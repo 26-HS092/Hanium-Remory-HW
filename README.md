@@ -151,6 +151,7 @@ Flutter 앱으로 어르신 상태를 보고,
 | **녹음/VAD** | PyAudio + `webrtcvad` (aggressiveness 2) | RMS 에너지 게이트 병행, 말끝 침묵 2초로 종료 |
 | **STT** | Whisper-base `.hef` @ Hailo GenAI | `small.hef` 은 언어 파라미터 무시 버그가 있어 base 사용 |
 | **감정 인식** | YuNet(얼굴 검출) + HSEmotion(AffectNet 8감정) | picamera2 · 0.7초 간격 샘플 → 신뢰도 가중 다수결 |
+| **얼굴 트래킹** | Pixy2 팬틸트 + YuNet | Pi 카메라로 얼굴을 찾고 Pixy2 서보를 PD 제어 · 15fps |
 | **RAG** | Chroma + `jhgan/ko-sroberta-multitask` | 안정 ID 기반 증분 동기화 (사진 수백 장도 빠름) |
 | **비전 분석** | Gemini 2.5 Flash (선택) | 사진 → 기억 텍스트. 꺼두면 보호자 설명을 그대로 사용 |
 | **LLM** | Groq (`openai/gpt-oss-120b`) | JSON 모드로 `reply` + `expression` 동시 생성 |
@@ -170,6 +171,7 @@ audio_out.py         스피커 재생 + CosyVoice2 스트리밍 TTS
 conversation_log.py  대화 한 턴을 로컬 JSONL 로 저장 (백엔드가 pull)
 safety.py            어르신 말에서 위험 신호를 가려냄 (규칙 + LLM 두 겹)
 test_safety.py       안전 판별 테스트 — 오탐 위주로 검증
+test_face_tracker.py 트래킹 제어 루프 시뮬레이션 (하드웨어 없이)
 
 stt/
 └── stt4vad_hat.py   Hailo Whisper STT + 환청 필터
@@ -177,7 +179,9 @@ stt/
 emotion/
 ├── config.py        모델 경로 · 카메라 · 감정 라벨(한글 매핑)
 ├── vision.py        picamera2 캡처 → YuNet 검출 → HSEmotion 분류
-└── emotion_service.py  발화 구간 동안 샘플링 → 다수결 라벨
+├── emotion_service.py  발화 구간 동안 샘플링 → 다수결 라벨
+├── face_tracker.py  얼굴 위치 → PD 제어 → Pixy2 팬틸트 (백그라운드)
+└── pixy_servo.py    Pixy2 서보·색 블록 래퍼 (libpixyusb2)
 
 rag/
 ├── retriever.py       기억 검색 + LLM 컨텍스트 문자열 생성
@@ -265,6 +269,58 @@ python test_safety.py
 ```
 
 안전 판별이 위험한 말을 잡는지, **멀쩡한 말을 위험으로 오해하지 않는지** 확인합니다.
+
+---
+
+## 🎯 얼굴 트래킹 (Pixy2 팬틸트)
+
+모리가 말하는 어르신 쪽으로 고개를 돌립니다. 얼굴이 화면 가운데 있으니 감정 샘플도 잘리지 않습니다.
+
+**Pixy2 카메라는 사람을 못 알아봅니다.** Pixy2 는 '색 덩어리'만 찾는 칩이라 사람 형태를 인식하지 못합니다.
+그래서 역할을 나눴습니다.
+
+| | 하는 일 |
+|---|---|
+| **Pi 카메라 + YuNet** | 얼굴이 화면 어디 있는지 찾는다 (감정 인식과 같은 카메라·같은 검출기) |
+| **Pixy2** | 팬틸트 서보를 돌린다 (`set_servos`, 0~1000) |
+
+**설치: Pi 카메라를 Pixy2 와 같은 틸트 플레이트에, 렌즈 바로 아래에 붙입니다.**
+모터가 돌면 카메라도 같이 돌기 때문에, 카메라 화면 속 얼굴을 가운데로 맞추는 것만으로 추적이 됩니다(폐루프).
+두 렌즈가 같은 방향을 보도록 평행하게, 리본 케이블은 팬 회전 범위만큼 여유를 둡니다
+(Pi 5 는 22핀 → 15핀 변환 케이블, 30cm 이상 권장).
+
+`TRACK_SOURCE=pixy` 로 바꾸면 Pixy2 가 PixyMon 에서 학습한 색(시그니처 1~3 — 피부색이나 색 마커)을 직접 따라갑니다.
+조명·배경에 민감해서 기본값은 `face` 입니다.
+
+### Pixy2 파이썬 모듈 빌드 (파이에서 한 번)
+
+```bash
+sudo apt install -y git swig libusb-1.0-0-dev g++ python3-dev python3-setuptools
+git clone https://github.com/charmedlabs/pixy2.git ~/pixy2
+cd ~/pixy2/scripts && ./build_libpixyusb2.sh && ./build_python_demos.sh
+cp ~/pixy2/build/python_demos/pixy.py ~/pixy2/build/python_demos/_pixy*.so  <이 저장소>/emotion/
+```
+
+> `build_python_demos.sh` 는 `python` 명령을 씁니다. 없으면 `sudo apt install python-is-python3`.
+> sudo 없이 USB 에 접근하려면 Pixy2 udev 규칙을 추가하세요. 모듈이나 Pixy2 가 없으면 트래킹만 꺼지고 대화는 그대로 됩니다.
+
+### 방향·게인 맞추기
+
+```bash
+cd emotion && python face_tracker.py      # 트래킹만 단독 실행
+```
+
+| 증상 | 조치 (`.env` 또는 `emotion/config.py`) |
+|---|---|
+| 얼굴 반대쪽으로 고개가 돌아감 | 그 축만 `PAN_DIR=-1` / `TILT_DIR=-1` |
+| 카메라를 거꾸로 달았음 | `CAM_HFLIP=true` `CAM_VFLIP=true` (감정 모델은 똑바른 얼굴이 필요) |
+| 가운데서 덜덜 떨림 · 모터 소리 | `TRACK_DEADBAND` 키우기, `PAN_KP`/`TILT_KP` 낮추기 |
+| 따라가는 게 느림 | `PAN_KP`/`TILT_KP` 올리기 (떨리기 시작하면 다시 내림) |
+| 트래킹을 끄고 싶음 | `TRACK_ENABLED=false` |
+
+```bash
+python test_face_tracker.py   # 하드웨어 없이 제어 루프 수렴·부호 검증
+```
 
 ---
 

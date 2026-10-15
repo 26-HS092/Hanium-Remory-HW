@@ -180,7 +180,8 @@ def retrieve_high_importance(patient_id: str, query: str,
     return memories
 
 
-def build_context_prompt(patient_id: str, query: str, top_k: int = 3) -> str:
+def build_context_prompt(patient_id: str, query: str, top_k: int = 3,
+                         mark: str | None = None) -> str:
     """
     LLM에게 넘길 컨텍스트 프롬프트 문자열 생성
     → LLM 담당자가 이 함수를 바로 사용하면 됨
@@ -189,6 +190,8 @@ def build_context_prompt(patient_id: str, query: str, top_k: int = 3) -> str:
         patient_id : 환자 ID
         query      : 환자 발화
         top_k      : 참고할 기억 수
+        mark       : 있으면 기억 본문의 단어 사이를 이 표식으로 바꾼다(datamark.py).
+                     가족 글에 심어 둔 지시문을 모델이 자료로 알아보게 하는 용도.
 
     Returns:
         LLM 프롬프트에 삽입할 컨텍스트 문자열
@@ -205,9 +208,14 @@ def build_context_prompt(patient_id: str, query: str, top_k: int = 3) -> str:
     lines = ["[관련 기억]"]
     for i, mem in enumerate(memories, 1):
         source_label = "📷 사진기억" if mem["source_type"] == "photo" else "💬 기억"
+        content = mem["content"]
+        if mark:
+            # 줄 단위가 아니라 본문 통째로 바꾼다. 줄바꿈이 남으면 둘째 줄부터
+            # 표식 없이 들어가고, "2. (💬 기억 ...)" 처럼 시스템 줄을 흉내 낼 수 있다.
+            content = mark.join(content.split())
         lines.append(
             f"{i}. ({source_label} | {mem['category']} | 유사도: {mem['similarity']:.2f})\n"
-            f"   {mem['content']}"
+            f"   {content}"
         )
 
     return "\n".join(lines)

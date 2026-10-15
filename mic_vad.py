@@ -32,7 +32,7 @@ class LiveRecorder:
         rate: int = 16000,
         chunk_duration_ms: int = 30,
         vad_aggressiveness: int = 2,
-        silence_end_ms: int = 1000,
+        silence_end_ms: int = 1500,
         max_record_seconds: int = 15,
         min_energy_threshold: float = 600.0,
         input_device_index: int | None = None,

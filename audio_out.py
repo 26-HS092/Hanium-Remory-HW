@@ -185,16 +185,50 @@ def synthesize_and_play_stream(text, url, key, sample_rate=24000, buffer_bytes=9
     spk_id: 어떤 화자(목소리)로 합성할지. None 이면 서버 기본 목소리(caregiver).
             기본 목소리로 등록한 가족 음성의 speaker_id 를 넘기면 그 목소리로 말한다.
     """
+    def open_stream():
+        return requests.post(url, headers={"x-api-key": key},
+                             json={"text": text, "spk_id": spk_id},
+                             stream=True, timeout=60)
+
+    return _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, "TTS")
+
+
+def synthesize_and_play_fish(text, key, reference_id=None, model=None,
+                             sample_rate=24000, buffer_bytes=24000,
+                             latency="balanced", on_start=None):
+    """Fish Audio 클라우드 TTS(https://api.fish.audio/v1/tts)로 스트리밍 재생.
+
+    reference_id: Fish Audio 에서 고른/만든 목소리 모델 ID. None 이면 Fish 기본 목소리.
+    model       : 요청 헤더 'model'(예: "s1", "s2.1-pro"). None 이면 Fish 기본 모델.
+    latency     : "low" | "balanced" | "normal". 낮을수록 첫소리가 빠르고 품질은 조금 떨어진다.
+    PCM(16bit mono)으로 받아서 CosyVoice 와 같은 aplay 파이프로 재생한다.
+    """
+    headers = {"Authorization": f"Bearer {key}"}
+    if model:
+        headers["model"] = model
+    body = {"text": text, "format": "pcm", "sample_rate": sample_rate, "latency": latency}
+    if reference_id:
+        body["reference_id"] = reference_id
+
+    def open_stream():
+        return requests.post("https://api.fish.audio/v1/tts", headers=headers,
+                             json=body, stream=True, timeout=60)
+
+    return _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, "TTS(Fish)")
+
+
+def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label):
+    """open_stream() 이 돌려준 PCM 스트리밍 응답을 백그라운드로 받으며 aplay 로 재생."""
     t0 = time.perf_counter()
     q = queue.Queue()
     box = {"ttfb": None, "dl_done": None, "err": None, "bytes": 0}
 
     def downloader():
         try:
-            with requests.post(url, headers={"x-api-key": key},
-                               json={"text": text, "spk_id": spk_id},
-                               stream=True, timeout=60) as r:
-                r.raise_for_status()
+            with open_stream() as r:
+                if not r.ok:
+                    # 인증/결제 오류 등은 본문에 이유가 담겨 온다.
+                    raise RuntimeError(f"{label} HTTP {r.status_code}: {r.text[:200]}")
                 for chunk in r.iter_content(chunk_size=4096):
                     if box["ttfb"] is None:
                         box["ttfb"] = time.perf_counter()
@@ -248,7 +282,7 @@ def synthesize_and_play_stream(text, url, key, sample_rate=24000, buffer_bytes=9
 
     audio_sec = box["bytes"] / (sample_rate * 2)
     print(
-        f"   ⏱  TTS  서버첫청크 {(box['ttfb'] - t0):.2f}s"
+        f"   ⏱  {label}  서버첫청크 {(box['ttfb'] - t0):.2f}s"
         f" | 첫소리 {(t_first - t0):.2f}s"
         f" | 다운로드완료 {(box['dl_done'] - t0):.2f}s"
         f" | 재생완료 {(t_end - t0):.2f}s"

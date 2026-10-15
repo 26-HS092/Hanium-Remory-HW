@@ -42,6 +42,11 @@ class EmotionService:
         self._stop = threading.Event()     # set → 샘플 루프 종료(중단 가능한 sleep용)
         self._thread = None
 
+    @property
+    def camera(self):
+        """얼굴 트래킹(face_tracker.py)이 같은 카메라를 쓰도록 내어준다."""
+        return self._cam
+
     # ── 발화 시작: 프레임 샘플링 백그라운드 시작 ──────────
     def on_speech_start(self):
         with self._lock:
