@@ -141,6 +141,12 @@ except Exception as _e:                          # pragma: no cover
     FaceDisplay = None
     print(f"⚠️  표정 표시 모듈 import 실패 → 표정 없이 동작: {_e}")
 
+try:
+    from face_tracker import create_tracker   # noqa: E402
+except Exception as _e:                          # pragma: no cover
+    create_tracker = None
+    print(f"⚠️  얼굴 트래킹 모듈 import 실패 → 트래킹 없이 동작: {_e}")
+
 
 # RAG retriever.py 안에서 "./chroma_db" 상대경로를 쓰므로 CWD를 RAG 폴더로 이동
 os.chdir(ROOT / "rag")
@@ -914,6 +920,11 @@ def main() -> None:
         except Exception as e:
             print(f"⚠️  감정 인식 비활성화(카메라/모델 초기화 실패): {e}")
 
+    # 🎯 얼굴 트래킹: Pixy2 팬틸트가 어르신 얼굴을 따라간다. 카메라는 감정 쪽과 공유.
+    tracker = None
+    if create_tracker is not None:
+        tracker = create_tracker(camera=emotion_svc.camera if emotion_svc else None)
+
     groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
     # RAG 초기 동기화(백엔드 데이터로 chroma 생성) → 그 다음 워밍업.
@@ -1156,6 +1167,8 @@ def main() -> None:
     if turns_this_session:
         report_activity("DAILY_CONVERSATION", f"{turns_this_session}번 주고받았어요")
 
+    if tracker:
+        tracker.close()          # 카메라보다 먼저 멈춰야 닫힌 카메라를 안 부른다
     if emotion_svc:
         emotion_svc.close()
     if face:

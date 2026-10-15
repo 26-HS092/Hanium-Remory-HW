@@ -8,6 +8,7 @@
 원본 이미지는 저장하지 않고 메모리에서만 처리합니다.
 """
 import os
+import threading
 
 import cv2
 import numpy as np
@@ -17,21 +18,29 @@ import face_crop
 
 
 class Camera:
-    """picamera2 래퍼. 한 장씩 빠르게 캡처."""
+    """picamera2 래퍼. 한 장씩 빠르게 캡처.
+
+    감정 샘플링과 얼굴 트래킹(face_tracker.py)이 카메라 하나를 같이 쓴다.
+    두 스레드가 동시에 capture_array 를 부르지 않도록 락으로 줄을 세운다.
+    """
 
     def __init__(self, size=config.CAM_SIZE):
         from picamera2 import Picamera2  # 파이 전용. import는 여기서.
+        from libcamera import Transform
         self._picam = Picamera2()
         cfg = self._picam.create_preview_configuration(
-            main={"size": size, "format": "RGB888"}
+            main={"size": size, "format": "RGB888"},
+            transform=Transform(hflip=config.CAM_HFLIP, vflip=config.CAM_VFLIP),
         )
         self._picam.configure(cfg)
         self._picam.start()
+        self._lock = threading.Lock()
 
     def capture(self):
         """현재 프레임을 BGR ndarray로 반환."""
         # picamera2의 "RGB888"은 실제로 BGR 순서로 배열을 반환 → OpenCV에 그대로 사용.
-        return self._picam.capture_array()
+        with self._lock:
+            return self._picam.capture_array()
 
     def close(self):
         try:
