@@ -2,13 +2,18 @@
 face_display_2.py  (브라우저 얼굴 버전 — 기존 pygame FaceDisplay 대체)
 ---------------------------------------------------------------
 브라우저(mori_face.html)에 WebSocket으로 표정/말하기/사진 명령을 보낸다.
-main.py 는 set_expression / listen_start / listen_stop / start_speaking / stop_speaking /
-show_notice / hide_notice / show_photo / hide_photo / close 만 쓴다.
+main.py 는 set_expression / listen_start / listen_stop / think_start / think_stop /
+listen_level / nod / start_speaking / stop_speaking /
+show_notice / hide_notice / show_photo / hide_photo / has_screen / ask_show / ask_wait /
+close 만 쓴다. 화면에서 누른 답(예/아니오)과 얼굴 터치(on_answer / on_touch)는
+같은 WebSocket 으로 거꾸로 받는다.
 
 필요: pip install websockets
 브라우저는 chromium --kiosk 로 mori_face.html 을 띄워두면 자동 연결된다.
 """
-import asyncio, json, threading
+from __future__ import annotations
+
+import asyncio, itertools, json, queue, threading, time
 import websockets
 
 
@@ -18,7 +23,19 @@ class FaceDisplay2:
         self._clients = set()
         self._cur_expr = "평온"
         self._listening = False
+        self._thinking = False
         self._notice = None          # (제목, 부제) — 안내가 떠 있는 동안만
+        # 화면에서 묻는 중인 질문 (id, 제목, 부제) 과 눌린 답. 답은 브라우저가
+        # 보내오고 ask_wait 가 꺼내 간다.
+        self._ask = None
+        self._ask_ids = itertools.count(1)
+        self._answers: "queue.Queue[tuple[int, str]]" = queue.Queue()
+        # 화면이 눌린 그 순간 부를 함수(답을 받는다). 누른 소리를 바로 내는 데 쓴다.
+        # WebSocket 스레드에서 불리니 오래 걸리는 일은 따로 돌려야 한다.
+        self.on_answer = None
+        # 얼굴을 건드리셨을 때 부를 함수(kind: "poke" 톡 건드림 | "pet" 쓰다듬기).
+        self.on_touch = None
+        self._last_level = 0.0
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -36,13 +53,17 @@ class FaceDisplay2:
                                          ensure_ascii=False))
                 if self._listening:
                     await ws.send(json.dumps({"cmd": "listen_start"}))
+                if self._thinking:
+                    await ws.send(json.dumps({"cmd": "think_start"}))
                 if self._notice:
                     title, sub, icon = self._notice
                     await ws.send(json.dumps(
                         {"cmd": "notice", "title": title, "sub": sub, "icon": icon},
                         ensure_ascii=False))
-                async for _msg in ws:
-                    pass
+                if self._ask:
+                    await ws.send(json.dumps(self._ask_msg(), ensure_ascii=False))
+                async for raw in ws:
+                    self._on_message(raw)
             finally:
                 self._clients.discard(ws)
 
@@ -52,6 +73,30 @@ class FaceDisplay2:
 
         self._loop.run_until_complete(boot())
         self._loop.run_forever()
+
+    def _on_message(self, raw):
+        """화면에서 온 소식. 지금은 질문에 누른 답 하나뿐이다."""
+        try:
+            m = json.loads(raw)
+        except (TypeError, ValueError):
+            return
+        if m.get("evt") == "ask_answer" and m.get("answer") in ("yes", "no"):
+            self._answers.put((m.get("id"), m["answer"]))
+            if self.on_answer:
+                try:
+                    self.on_answer(m["answer"])
+                except Exception:
+                    pass
+        elif m.get("evt") == "touch" and m.get("kind") in ("poke", "pet"):
+            if self.on_touch:
+                try:
+                    self.on_touch(m["kind"])
+                except Exception:
+                    pass
+
+    def _ask_msg(self) -> dict:
+        ask_id, title, sub = self._ask
+        return {"cmd": "ask", "id": ask_id, "title": title, "sub": sub}
 
     def _send(self, msg: dict):
         data = json.dumps(msg, ensure_ascii=False)
@@ -86,7 +131,36 @@ class FaceDisplay2:
         self._listening = False
         self._send({"cmd": "listen_stop"})
 
+    def listen_level(self, v: float):
+        """듣는 중 목소리 크기(0~1). 전구가 목소리에 맞춰 밝아진다.
+
+        녹음 루프에서 0.1초마다 불린다. 거의 안 변했으면 보내지 않는다.
+        """
+        if abs(v - self._last_level) < 0.04 and not (v == 0 and self._last_level):
+            return
+        self._last_level = v
+        self._send({"cmd": "level", "v": round(v, 2)})
+
+    def nod(self):
+        """말씀 중간에 쉬실 때 한 번 끄덕인다. 너무 잦지 않게 화면이 걸러 준다."""
+        self._send({"cmd": "nod"})
+
+    def think_start(self):
+        """다 듣고 답을 만드는 중이다 — 생각하는 얼굴을 짓는다.
+
+        답이 나오기까지 몇 초 걸리는데 얼굴이 가만히 있으면 못 알아들은 줄
+        아신다. 눈을 위로 굴리고 고개를 살짝 갸웃하며 점 세 개를 띄운다.
+        말을 시작하면(speak_start) 화면이 알아서 그친다.
+        """
+        self._thinking = True
+        self._send({"cmd": "think_start"})
+
+    def think_stop(self):
+        self._thinking = False
+        self._send({"cmd": "think_stop"})
+
     def start_speaking(self):
+        self._thinking = False
         self._send({"cmd": "speak_start"})
 
     def stop_speaking(self):
@@ -107,6 +181,46 @@ class FaceDisplay2:
         self._notice = None
         self._send({"cmd": "notice_hide"})
 
+    def has_screen(self) -> bool:
+        """화면이 붙어 있는지. 안 붙어 있으면 터치로 물을 수 없다."""
+        return bool(self._clients)
+
+    def ask_show(self, title: str, sub: str = "") -> int:
+        """화면에 예/아니오를 띄운다. ask_wait 에 넘길 번호를 돌려준다.
+
+        사진을 보고 계시던 중이어도 사진이 비쳐 보이게 반투명으로 덮는다.
+        """
+        while True:                      # 지난 질문에 늦게 눌린 답은 버린다
+            try:
+                self._answers.get_nowait()
+            except queue.Empty:
+                break
+        ask_id = next(self._ask_ids)
+        self._ask = (ask_id, title, sub)
+        self._send(self._ask_msg())
+        return ask_id
+
+    def ask_wait(self, ask_id: int, timeout: float) -> str | None:
+        """눌린 답("yes"/"no")을 기다린다. 아무것도 안 누르시면 None.
+
+        끝나면 질문을 내린다.
+        """
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                try:
+                    got_id, answer = self._answers.get(timeout=left)
+                except queue.Empty:
+                    return None
+                if got_id == ask_id:
+                    return answer
+        finally:
+            self._ask = None
+            self._send({"cmd": "ask_hide"})
+
     def show_photo(self, url: str):
         """가족이 보낸 사진을 화면 전체에 띄운다."""
         self._send({"cmd": "photo", "url": url})
@@ -117,8 +231,12 @@ class FaceDisplay2:
 
     def close(self):
         self._listening = False
+        self._thinking = False
         self._notice = None
+        self._ask = None
+        self._send({"cmd": "ask_hide"})
         self._send({"cmd": "listen_stop"})
+        self._send({"cmd": "think_stop"})
         self._send({"cmd": "notice_hide"})
         self._send({"cmd": "emotion", "name": "평온"})
         try:
