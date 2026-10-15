@@ -12,9 +12,12 @@ Pi 설치: sudo apt install mpg123
 - None 이면 시스템 default 로 재생.
 """
 
+import math
 import platform
 import shutil
 import queue
+import struct
+import wave
 import threading
 import subprocess
 import time
@@ -114,6 +117,65 @@ def play_wav(path: str) -> None:
         raise RuntimeError(
             "Windows: `pip install playsound==1.2.2` 가 필요합니다."
         ) from e
+
+
+# 효과음. 소리 하나에 뜻 하나만 둔다 — 같은 소리를 여러 곳에 쓰면 헷갈리신다.
+# (음표, 울림) — 음표는 (시작 초, 주파수), 울림은 소리가 잦아드는 빠르기(초).
+CHIMES = {
+    "wake":    (((0.00, 1046.5),), 0.16),                          # 띵 — 불렀을 때
+    "heard":   (((0.00, 784.0), (0.11, 1046.5)), 0.16),            # 또롱↑ — 다 들었어요
+    "bye":     (((0.00, 1046.5), (0.11, 784.0)), 0.16),            # 또롱↓ — 이제 쉴게요
+    "message": (((0.00, 659.3), (0.30, 523.3)), 0.30),             # 딩동 — 가족 메시지
+    "sent":    (((0.00, 523.3), (0.09, 659.3), (0.18, 784.0), (0.27, 1046.5)), 0.16),  # 띠리링 — 보냈어요
+    # 약 시간. 늘 같은 소리가 '약 드실 때' 라는 습관 신호가 되게, 다른 소리보다
+    # 느리고 길게 둬서 확실히 구분되게 한다.
+    "medicine": (((0.00, 1046.5), (0.22, 784.0), (0.44, 1046.5), (0.66, 1318.5)), 0.22),
+    "tap":     (((0.00, 1318.5),), 0.035),                         # 톡 — 화면을 눌렀어요
+    "poke":    (((0.00, 880.0), (0.06, 1318.5)), 0.06),            # 뿅 — 얼굴을 건드렸어요
+    "pet":     (((0.00, 784.0), (0.20, 659.3), (0.40, 784.0)), 0.30),  # 랄라 — 쓰다듬어 줬어요
+}
+
+
+def make_chime_wav(path: str, notes, decay: float = 0.16,
+                   sample_rate: int = 24000) -> str:
+    """'또롱' 하고 올라가는 짧은 효과음 wav 를 만든다(0.5초 남짓).
+
+    말씀을 다 들었다는 신호로 쓴다. 사람 목소리 맞장구는 매번 같은 말이면
+    금방 기계 같고 실제 답과 이어 들으면 어색해서, 말이 아닌 소리로 둔다.
+    파일을 저장소에 두지 않고 처음 한 번 만들어 쓴다. 이미 있으면 그대로 둔다.
+
+    음을 살짝 겹쳐 올린다. 올라가는 음은 '알았어요' 처럼 들린다.
+    notes·decay 를 바꾸면 다른 신호음이 된다(CHIMES 참고). 어르신 귀에 날카롭지 않게 배음을 거의 넣지 않고 소리도 작게 둔다.
+    """
+    p = Path(path)
+    if p.exists():
+        return str(p)
+
+    length = notes[-1][0] + max(0.12, decay * 2.75)
+    n = int(sample_rate * length)
+    samples = [0.0] * n
+    for start, freq in notes:
+        s0 = int(start * sample_rate)
+        for i in range(n - s0):
+            t = i / sample_rate
+            attack = min(1.0, t / 0.008)          # 딸깍 소리가 안 나게 살짝 연다
+            env = attack * math.exp(-t / decay)
+            w = math.sin(2 * math.pi * freq * t) + 0.12 * math.sin(4 * math.pi * freq * t)
+            samples[s0 + i] += 0.2 * env * w
+
+    fade = int(0.02 * sample_rate)                # 끝도 딸깍 안 나게 닫는다
+    for i in range(fade):
+        samples[n - 1 - i] *= i / fade
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(p), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(b"".join(
+            struct.pack("<h", int(max(-1.0, min(1.0, s)) * 32767)) for s in samples
+        ))
+    return str(p)
 
 
 def synthesize_and_play_stream(text, url, key, sample_rate=24000, buffer_bytes=96000,

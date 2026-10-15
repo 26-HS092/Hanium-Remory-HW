@@ -6,7 +6,9 @@
 <title>모리 얼굴</title>
 <style>
   html,body{margin:0;height:100%;background:#0e1216;overflow:hidden;cursor:none;}
-  #face{position:fixed;inset:0;width:100vw;height:100vh;}
+  /* 얼굴을 문지르실 때 브라우저가 화면 넘기기로 가로채지 않게 막는다. */
+  #face{position:fixed;inset:0;width:100vw;height:100vh;touch-action:none;
+        -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
   /* 가족 사진 오버레이 — 표시될 때만 얼굴 위를 덮는다 */
   #photo{position:fixed;inset:0;width:100vw;height:100vh;object-fit:contain;
          background:#000;display:none;z-index:10;}
@@ -18,8 +20,29 @@
           background:#0e1216;font-family:system-ui,'Apple SD Gothic Neo',sans-serif;
           text-align:center;padding:0 6vw;}
   #noticeIcon{width:22vh;height:22vh;}
+  /* 보냈어요/못 보냈어요 아이콘은 톡 튀어나오고, 체크는 그어지듯 나타난다. */
+  #noticeIcon.pop{animation:iconPop .45s cubic-bezier(.3,1.6,.5,1) both;}
+  #noticeIcon.pop #checkMark{animation:checkDraw .35s .25s ease-out forwards;}
+  @keyframes iconPop{from{transform:scale(.3);opacity:0}to{transform:scale(1);opacity:1}}
+  @keyframes checkDraw{to{stroke-dashoffset:0}}
   #noticeTitle{font-size:13vh;line-height:1.15;font-weight:800;color:#FFD98A;}
   #noticeSub{font-size:7vh;line-height:1.2;font-weight:600;color:#B9A88F;}
+  /* 화면 터치로 묻는 예/아니오. 안내(11)보다 위에 둔다. 사진을 보고 계시던
+     중이면 사진이 비쳐 보이게 반투명으로 덮는다 — 무엇에 답하는지 보이게.
+     손이 떨리셔도 누르기 쉽게 버튼을 화면 절반씩 크게 잡는다. */
+  #ask{position:fixed;inset:0;display:none;z-index:12;
+       flex-direction:column;align-items:center;justify-content:center;gap:5vh;
+       background:rgba(14,18,22,.82);font-family:system-ui,'Apple SD Gothic Neo',sans-serif;
+       text-align:center;padding:0 5vw;cursor:auto;
+       -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
+  #askTitle{font-size:10vh;line-height:1.15;font-weight:800;color:#FFD98A;}
+  #askSub{font-size:6vh;font-weight:600;color:#B9A88F;margin-top:-3vh;}
+  #askBtns{display:flex;gap:4vw;width:100%;}
+  #askBtns button{flex:1;height:30vh;border-radius:4vh;border:none;
+       font:800 12vh system-ui,'Apple SD Gothic Neo',sans-serif;touch-action:manipulation;}
+  #askYes{background:#FFC95C;color:#2a1d05;}
+  #askNo{background:#3a4652;color:#e8dccb;}
+  #askBtns button:active{transform:scale(.96);filter:brightness(.9);}
 </style>
 </head>
 <body>
@@ -34,6 +57,13 @@
             fill="none" stroke-width="1.2" stroke-opacity="0.2"/>
       <circle id="wakeBulb" cx="378" cy="36" r="7"/>
       <rect id="wakeBase" x="373.5" y="44" width="9" height="4" rx="1.5"/>
+    </g>
+    <!-- 생각하는 중 표시. 다 듣고 답을 만드는 동안 점 세 개가 차례로 통통 뛴다.
+         전구 자리에 둔다 — '들어요' 다음이 '생각해요' 라는 게 한 곳에서 이어 보이게. -->
+    <g id="think" opacity="0">
+      <circle id="td0" cx="350" cy="38" r="5"/>
+      <circle id="td1" cx="366" cy="38" r="5"/>
+      <circle id="td2" cx="382" cy="38" r="5"/>
     </g>
 
     <g id="ink">
@@ -52,6 +82,19 @@
         <rect x="10" y="23" width="44" height="18" rx="9" fill="#FFC95C"/>
         <path d="M32,23 L32,41" stroke="#0e1216" stroke-width="3.5"/>
       </g>
+      <!-- 답장을 보냈어요: 동그라미 안 체크. 동그라미가 먼저 뜨고 체크가 그어진다. -->
+      <g id="iconCheck" display="none">
+        <circle cx="32" cy="32" r="27" fill="#7FD3A0"/>
+        <path id="checkMark" d="M19,33 L28,42 L46,23" fill="none" stroke="#0e1216"
+              stroke-width="6" stroke-linecap="round" stroke-linejoin="round"
+              stroke-dasharray="44" stroke-dashoffset="44"/>
+      </g>
+      <!-- 못 보냈어요: 느낌표. 겁나지 않게 빨강 대신 주황으로 둔다. -->
+      <g id="iconFail" display="none">
+        <circle cx="32" cy="32" r="27" fill="#F2A65A"/>
+        <rect x="29" y="15" width="6" height="22" rx="3" fill="#0e1216"/>
+        <circle cx="32" cy="46" r="3.6" fill="#0e1216"/>
+      </g>
       <g id="iconMsg" display="none">
         <rect x="7" y="13" width="50" height="33" rx="10" fill="#FFC95C"/>
         <path d="M20,46 L20,58 L33,46 Z" fill="#FFC95C"/>
@@ -59,6 +102,16 @@
     </svg>
     <div id="noticeTitle"></div>
     <div id="noticeSub"></div>
+  </div>
+
+  <!-- 화면 터치로 묻는 예/아니오 (평소엔 숨김) -->
+  <div id="ask">
+    <div id="askTitle"></div>
+    <div id="askSub"></div>
+    <div id="askBtns">
+      <button id="askYes" type="button">예</button>
+      <button id="askNo" type="button">아니오</button>
+    </div>
   </div>
 
   <!-- 가족이 보낸 사진 (평소엔 숨김) -->
@@ -87,17 +140,77 @@
   // 듣는 중 표시. listenAmt 는 켜짐/꺼짐이 부드럽게 오가는 값이고,
   // wakePop 은 알아들은 그 순간 한 번 번쩍이고 잦아드는 값이다.
   var listening=false,listenAmt=0,wakePop=0;
+  // 듣는 중 목소리 크기(0~1). 파이썬이 0.1초마다 보낸다.
+  var level=0,levelTgt=0;
+  // 끄덕임. 말씀 중간에 쉬실 때 한 번. 너무 잦으면 건성으로 보여서 간격을 두고
+  // 가끔은 건너뛴다.
+  var nodStart=-1e9,lastNod=-1e9,NOD_MS=480,NOD_GAP_MS=1600;
+  // 얼굴 터치 반응. 반응하는 동안은 파이썬이 보낸 표정을 baseEmo 에 두었다가
+  // 반응이 끝나면 돌아간다.
+  var baseEmo="평온",reacting=false,reactTimer=null,petTilt=0,petTiltTgt=0;
   var WAKE_COL="255,201,92";   // 전구색. 표정 색과 섞이지 않게 따로 둔다.
+  // 생각하는 중. thinkAmt 도 켜짐/꺼짐 사이를 부드럽게 오간다.
+  var thinking=false,thinkAmt=0;
 
-  function setEmotion(n){var p=E[n];if(!p)return;keys.forEach(function(k){tgt[k]=p[k];});tgt.col=p.col.slice();vpop+=p.kick;}
+  function applyEmotion(n){var p=E[n];if(!p)return;keys.forEach(function(k){tgt[k]=p[k];});tgt.col=p.col.slice();vpop+=p.kick;}
+  function setEmotion(n){if(!E[n])return;baseEmo=n;if(!reacting)applyEmotion(n);}
 
   // ── 가족 사진 표시/숨김 ──
   function showPhoto(url){var el=document.getElementById("photo");if(!el||!url)return;el.src=url;el.style.display="block";}
   function hidePhoto(){var el=document.getElementById("photo");if(!el)return;el.style.display="none";el.removeAttribute("src");}
 
   // ── 듣는 중 표시 ──
-  function listenStart(){if(!listening)wakePop=1;listening=true;}
-  function listenStop(){listening=false;}
+  function listenStart(){if(!listening)wakePop=1;listening=true;thinking=false;}
+  function listenStop(){listening=false;levelTgt=0;}
+  function setLevel(v){levelTgt=Math.max(0,Math.min(1,+v||0));}
+  function nod(){var now=performance.now();
+    if(now-lastNod<NOD_GAP_MS||Math.random()<0.25)return;
+    lastNod=nodStart=now;}
+
+  // ── 얼굴 터치 ── 톡 건드리면 깜짝 놀랐다가 웃고, 문지르면 눈을 감고 좋아한다.
+  // 사진·안내·질문이 떠 있으면 그 위를 누르는 거라 여기까지 오지 않는다.
+  function sendTouch(kind){try{if(sock&&sock.readyState===1)sock.send(JSON.stringify({evt:"touch",kind:kind}));}catch(e){}}
+  function endReactLater(ms){clearTimeout(reactTimer);
+    reactTimer=setTimeout(function(){reacting=false;petTiltTgt=0;applyEmotion(baseEmo);},ms);}
+  function poke(){reacting=true;applyEmotion("놀람");vpop+=1.4;
+    clearTimeout(reactTimer);
+    reactTimer=setTimeout(function(){applyEmotion("기쁨");endReactLater(1500);},420);
+    sendTouch("poke");}
+  var petting=false,lastPetSent=0;
+  function petMove(dx){
+    if(!petting){petting=true;reacting=true;clearTimeout(reactTimer);applyEmotion("기쁨");}
+    // 손가락 쪽으로 고개를 살짝 기댄다.
+    petTiltTgt=Math.max(-9,Math.min(9,petTiltTgt+dx*0.08));
+    var now=performance.now();
+    if(now-lastPetSent>1800){lastPetSent=now;sendTouch("pet");}   // 오래 쓰다듬으면 가끔 한 번 더
+  }
+  function petEnd(){if(!petting)return;petting=false;endReactLater(1400);}
+  (function(){
+    var el=document.getElementById("face"),down=null;
+    el.addEventListener("pointerdown",function(e){
+      if(speaking)return;    // 말하는 중엔 입 모양이 엉키지 않게 받지 않는다
+      down={x:e.clientX,y:e.clientY,t:performance.now(),dist:0,lx:e.clientX,ly:e.clientY};
+      try{el.setPointerCapture(e.pointerId);}catch(_){}
+    });
+    el.addEventListener("pointermove",function(e){
+      if(!down)return;
+      var dx=e.clientX-down.lx,dy=e.clientY-down.ly;
+      down.dist+=Math.hypot(dx,dy);down.lx=e.clientX;down.ly=e.clientY;
+      if(down.dist>60)petMove(dx);
+    });
+    function up(){
+      if(!down)return;
+      var quick=performance.now()-down.t<400,still=down.dist<25;
+      down=null;
+      if(petting)petEnd();else if(quick&&still)poke();
+    }
+    el.addEventListener("pointerup",up);
+    el.addEventListener("pointercancel",up);
+  })();
+
+  // ── 생각하는 중 표시 ── 말을 시작하면 그친다.
+  function thinkStart(){thinking=true;}
+  function thinkStop(){thinking=false;}
 
   // ── 안내 카드 ──
   function showNotice(title,sub,icon){
@@ -116,31 +229,62 @@
     s.style.display=(sub?"block":"none");
     // 보낸 사람이 본문보다 커 보이면 위계가 뒤집힌다. 늘 본문보다 작게 둔다.
     s.style.fontSize=Math.min(7,ts*0.62).toFixed(2)+"vh";
-    var msg=(icon==="message");
-    document.getElementById("iconPill").setAttribute("display",msg?"none":"inline");
-    document.getElementById("iconMsg").setAttribute("display",msg?"inline":"none");
+    var ICONS={pill:"iconPill",message:"iconMsg",check:"iconCheck",fail:"iconFail"};
+    var shown=ICONS[icon]||"iconPill";
+    for(var k in ICONS)document.getElementById(ICONS[k]).setAttribute("display",ICONS[k]===shown?"inline":"none");
+    var ic=document.getElementById("noticeIcon");
+    ic.classList.remove("pop");
+    if(icon==="check"||icon==="fail"){void ic.getBoundingClientRect();ic.classList.add("pop");}
     el.style.display="flex";
   }
   function hideNotice(){var el=document.getElementById("notice");if(el)el.style.display="none";}
 
-  window.Mori={setEmotion:setEmotion, speakStart:function(){speaking=true;}, speakStop:function(){speaking=false;},
+  // ── 화면 터치로 묻기 ── 누르면 바로 내리고 답을 파이썬에 보낸다.
+  // 한 질문에 한 번만 보낸다(두 번 눌러도, 두 버튼을 연달아 눌러도).
+  var sock=null,askId=null;
+  function showAsk(id,title,sub){
+    askId=id;
+    document.getElementById("askTitle").textContent=title||"";
+    var s=document.getElementById("askSub");s.textContent=sub||"";s.style.display=sub?"block":"none";
+    document.getElementById("ask").style.display="flex";
+  }
+  function hideAsk(){askId=null;document.getElementById("ask").style.display="none";}
+  function answer(a){
+    if(askId===null)return;
+    var id=askId;hideAsk();
+    try{if(sock&&sock.readyState===1)sock.send(JSON.stringify({evt:"ask_answer",id:id,answer:a}));}catch(e){}
+  }
+  document.getElementById("askYes").addEventListener("click",function(){answer("yes");});
+  document.getElementById("askNo").addEventListener("click",function(){answer("no");});
+
+  window.Mori={setEmotion:setEmotion, speakStart:function(){speaking=true;thinking=false;}, speakStop:function(){speaking=false;},
                showPhoto:showPhoto, hidePhoto:hidePhoto,
                listenStart:listenStart, listenStop:listenStop,
-               showNotice:showNotice, hideNotice:hideNotice};
+               thinkStart:thinkStart, thinkStop:thinkStop,
+               setLevel:setLevel, nod:nod,
+               showNotice:showNotice, hideNotice:hideNotice,
+               showAsk:showAsk, hideAsk:hideAsk};
 
   // WebSocket 제어 채널 (파이썬 FaceDisplay 가 명령을 보냄)
   function connect(){
     var ws;try{ws=new WebSocket(WS_URL);}catch(e){setTimeout(connect,2000);return;}
+    sock=ws;
     ws.onmessage=function(ev){var m;try{m=JSON.parse(ev.data);}catch(e){return;}
       if(m.cmd==="emotion")setEmotion(m.name);
-      else if(m.cmd==="speak_start")speaking=true;
+      else if(m.cmd==="speak_start"){speaking=true;thinking=false;}
       else if(m.cmd==="speak_stop")speaking=false;
       else if(m.cmd==="photo")showPhoto(m.url);
       else if(m.cmd==="photo_hide")hidePhoto();
       else if(m.cmd==="listen_start")listenStart();
       else if(m.cmd==="listen_stop")listenStop();
+      else if(m.cmd==="level")setLevel(m.v);
+      else if(m.cmd==="nod")nod();
+      else if(m.cmd==="think_start")thinkStart();
+      else if(m.cmd==="think_stop")thinkStop();
       else if(m.cmd==="notice")showNotice(m.title,m.sub,m.icon);
-      else if(m.cmd==="notice_hide")hideNotice();};
+      else if(m.cmd==="notice_hide")hideNotice();
+      else if(m.cmd==="ask")showAsk(m.id,m.title,m.sub);
+      else if(m.cmd==="ask_hide")hideAsk();};
     ws.onclose=function(){setTimeout(connect,2000);};
     ws.onerror=function(){try{ws.close();}catch(e){}};
   }
@@ -174,17 +318,37 @@
 
     // 듣는 중 표시. 켜질 때 확 번쩍였다가(wakePop) 은은한 맥박으로 가라앉는다.
     listenAmt+=((listening?1:0)-listenAmt)*0.18;
+    level+=(levelTgt-level)*(levelTgt>level?0.45:0.12);   // 빨리 켜지고 천천히 잦아든다
     wakePop*=0.93;
     if(wakePop<0.004)wakePop=0;
     var wakeG=document.getElementById("wake");
     if(listenAmt>0.004||wakePop>0){
+      // 조용할 땐 은은히 숨쉬고, 말씀하시면 목소리 크기만큼 밝고 커진다.
       var pulse=0.62+0.38*Math.sin((now-t0)/1000*3.4);
-      var wakeA=Math.min(1,listenAmt*pulse+wakePop);
+      var lit=Math.max(pulse*(1-level*0.6),0.55+0.45*level);
+      var wakeA=Math.min(1,listenAmt*lit+wakePop);
       wakeG.setAttribute("opacity",wakeA.toFixed(3));
-      set("wakeRing","stroke-width",(1.2+0.6*wakeA).toFixed(2));
-      set("wakeRing","stroke-opacity",(0.18+0.14*wakeA).toFixed(3));
+      set("wakeBulb","r",(7+4.5*level*listenAmt).toFixed(2));
+      set("wakeRing","stroke-width",(1.2+0.6*wakeA+1.4*level*listenAmt).toFixed(2));
+      set("wakeRing","stroke-opacity",(0.18+0.14*wakeA+0.3*level*listenAmt).toFixed(3));
     }else if(wakeG.getAttribute("opacity")!=="0"){
       wakeG.setAttribute("opacity","0");
+    }
+
+    // 생각하는 중. 점 세 개가 차례로 통통 뛴다.
+    thinkAmt+=((thinking?1:0)-thinkAmt)*0.12;
+    if(thinkAmt<0.004&&!thinking)thinkAmt=0;
+    var thinkG=document.getElementById("think");
+    if(thinkAmt>0){
+      thinkG.setAttribute("opacity",thinkAmt.toFixed(3));
+      for(var di=0;di<3;di++){
+        var dph=((now-t0)/1000*1.6-di*0.18+1)%1;
+        var bump=dph<0.4?Math.sin(dph/0.4*Math.PI):0;   // 한 박자 중 앞쪽 40%만 뛴다
+        set("td"+di,"cy",(38-bump*6).toFixed(2));
+        set("td"+di,"fill-opacity",(0.4+0.6*bump).toFixed(3));
+      }
+    }else if(thinkG.getAttribute("opacity")!=="0"){
+      thinkG.setAttribute("opacity","0");
     }
 
     var sleepy=Math.max(0,cur.sleep);
@@ -192,11 +356,20 @@
     if(now>lastSac){var g=(1-sleepy);igXt=(Math.random()*2-1)*6*g;igYt=(Math.random()*2-1)*3*g;lastSac=now+1800+Math.random()*1800;}
     var breathe=Math.sin((now-t0)/1000*(sleepy>0.5?0.7:1.1))*0.018*(1+sleepy*0.8);
 
+    // 생각할 땐 고개를 살짝 갸웃하고 눈은 위로 올려 천천히 좌우로 굴린다.
+    var ts=(now-t0)/1000;
+    petTilt+=(petTiltTgt-petTilt)*0.12;
+    if(!petting)petTiltTgt*=0.96;
+    var tilt=cur.tilt+thinkAmt*(6+1.5*Math.sin(ts*1.3))+petTilt;
+    // 끄덕임: 아래로 내려갔다 올라오며 눈도 살짝 내리깐다.
+    var nodPh=(now-nodStart)/NOD_MS,nodK=(nodPh>=0&&nodPh<1)?Math.sin(nodPh*Math.PI):0;
+    var nodY=nodK*9;
     document.getElementById("ink").setAttribute("transform",
-      "translate("+CX+" "+CY+") rotate("+cur.tilt+") scale("+pop+") translate("+(-CX)+" "+(-CY)+")");
+      "translate(0 "+nodY.toFixed(2)+") translate("+CX+" "+CY+") rotate("+tilt+") scale("+pop+") translate("+(-CX)+" "+(-CY)+")");
 
-    var hh=Math.max(2,HH*(cur.eyeScaleY+breathe)*(1-blink));
-    var gx=igX,gy=cur.gazeY*22+igY,he=Math.max(0,Math.min(1,cur.happy));
+    var hh=Math.max(2,HH*(cur.eyeScaleY+breathe)*(1-blink)*(1-0.1*thinkAmt));
+    var gx=igX*(1-thinkAmt)+thinkAmt*8*Math.sin(ts*0.9);
+    var gy=cur.gazeY*22+igY*(1-thinkAmt)-thinkAmt*9+nodK*4,he=Math.max(0,Math.min(1,cur.happy));
     [["L",ECL],["R",ECR]].forEach(function(p){var s=p[0],c=p[1],cx=c.x+gx,cy=c.y+gy;
       var inCut=cur.inner*1.25*hh,outCut=cur.outer*1.25*hh,top=cy-hh;
       var tlY=(s==="L")?top+outCut:top+inCut,trY=(s==="L")?top+inCut:top+outCut;
@@ -213,7 +386,7 @@
     ["eyeLpath","eyeRpath","mouthOpen"].forEach(function(id){set(id,"fill",col);});
     ["archL","archR","mouthLine"].forEach(function(id){set(id,"stroke",col);});
     var wc="rgb("+WAKE_COL+")";
-    ["wakeBulb","wakeBase"].forEach(function(id){set(id,"fill",wc);});
+    ["wakeBulb","wakeBase","td0","td1","td2"].forEach(function(id){set(id,"fill",wc);});
     set("wakeRing","stroke",wc);
     document.getElementById("ink").style.filter="drop-shadow(0 0 13px rgba("+r+","+g2+","+bl+",.4))";
 

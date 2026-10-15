@@ -16,6 +16,7 @@ main.py
     python main.py
 """
 
+import hashlib
 import os
 import queue
 import requests
@@ -61,6 +62,11 @@ CHAT_CHECK_INTERVAL_SEC = 15
 # 가족 메시지를 읽어드린 뒤 답장을 몇 초까지 기다릴지. 말씀을 시작하시면
 # 끝날 때까지 듣는다(이 시간은 '시작' 을 기다리는 시간이다).
 REPLY_WAIT_SEC = 8
+# 화면에 '답장하시겠어요? 예/아니오' 를 띄우고 몇 초까지 눌러 주시길 기다릴지.
+# 안 누르시면 답장 안 하시는 걸로 보고 내린다.
+REPLY_ASK_SEC = 20
+# 답장을 보냈다는 카드를 적어도 몇 초 띄워 둘지
+REPLY_RESULT_SEC = 3
 # 가족 사진을 화면에 몇 초 동안 보여줄지
 PHOTO_DISPLAY_SEC = 30
 # 어르신 추억(RAG)을 백엔드에서 몇 초마다 동기화할지
@@ -111,7 +117,9 @@ from conversation_log import ConversationLogger  # noqa: E402
 
 from groq import Groq                        # noqa: E402
 from mic_vad import LiveRecorder            # noqa: E402
-from audio_out import play_wav, synthesize_and_play_stream   # noqa: E402
+from audio_out import (                                                # noqa: E402
+    play_wav, synthesize_and_play_stream, make_chime_wav, CHIMES,
+)
 from wakeword import MoriyaWakeWordDetector
 try:
     from emotion_service import EmotionService   # noqa: E402
@@ -386,14 +394,75 @@ def report_conversation(active: bool) -> None:
     _conversation_queue.put(active)
 
 
+# 효과음 wav 경로(이름 → 파일). 시작할 때 _prepare_cues 가 채운다.
+_cue_wavs: dict[str, str] = {}
+
+
+def _prepare_cues() -> None:
+    """효과음 wav 를 미리 만들어 둔다. 못 만든 소리는 빼고 간다 — 효과음이
+    없어도 대화는 해야 한다.
+
+    파일 이름에 음표를 섞어 둬서, CHIMES 를 고치면 새 파일이 저절로 생긴다.
+    """
+    for name, (notes, decay) in CHIMES.items():
+        try:
+            _cue_wavs[name] = make_chime_wav(
+                str(ROOT / "audio" / f"cue_{name}_{_cue_tag(notes, decay)}.wav"), notes, decay
+            )
+        except Exception as e:
+            print(f"⚠️  효과음 '{name}' 준비 실패 → 소리 없이 동작: {e}")
+
+
+def _cue_tag(notes, decay) -> str:
+    return hashlib.md5(repr((notes, decay)).encode()).hexdigest()[:8]
+
+
+def _play_cue(name: str) -> None:
+    """효과음을 끝까지 낸다. 스피커 잠금은 부르는 쪽이 쥔다."""
+    wav = _cue_wavs.get(name)
+    if not wav:
+        return
+    try:
+        play_wav(wav)
+    except Exception as e:
+        print(f"⚠️  효과음 재생 실패: {e}")
+
+
+def _on_face_touch(kind: str) -> None:
+    """얼굴을 건드리시면(poke) '뿅', 쓰다듬으시면(pet) '랄라'. 표정은 화면이
+    알아서 짓는다(소리보다 먼저 보여야 해서).
+
+    말씀하시는 중이면 소리를 내지 않는다 — 마이크가 그 소리를 말씀으로 듣는다.
+    """
+    if recording.is_set():
+        return
+    threading.Thread(target=_play_cue_if_free, args=(kind,), daemon=True).start()
+
+
+def _play_cue_if_free(name: str) -> None:
+    """스피커가 비어 있을 때만 효과음을 낸다.
+
+    다른 소리(약 알림·가족 메시지)가 나고 있으면 건너뛴다. 기다렸다 내면
+    한참 늦게 울려서 오히려 엉뚱하게 들린다.
+    """
+    if not speaker_lock.acquire(blocking=False):
+        return
+    try:
+        _play_cue(name)
+    finally:
+        speaker_lock.release()
+
+
 def _speak_when_free(
-    text: str, face=None, notice_title: str | None = None, notice_sub: str = ""
+    text: str, face=None, notice_title: str | None = None, notice_sub: str = "",
+    cue: str | None = None,
 ) -> None:
     """어르신이 말하는 중이면 그 턴이 끝나길 기다렸다가 음성으로 안내한다.
 
     [notice_title] 을 주면 말하는 동안 화면에 안내를 띄우고, 말이 끝나면
     내려서 모리 얼굴로 돌아온다. 소리를 놓쳤거나 잘 안 들리셔도 무슨
-    일인지 읽을 수 있게 하려는 것이다.
+    일인지 읽을 수 있게 하려는 것이다. [cue] 를 주면 말하기 전에 그
+    효과음을 먼저 낸다.
     """
     while recording.is_set():
         time.sleep(0.3)
@@ -403,6 +472,8 @@ def _speak_when_free(
             if notice_title:
                 face.show_notice(notice_title, notice_sub)
         try:
+            if cue:
+                _play_cue(cue)
             speak(text)
         finally:
             # 말이 끊기든 끝나든 안내가 화면에 남지 않게 한다.
@@ -418,6 +489,7 @@ def _confirm_medication(med_name: str, face=None) -> None:
         face,
         notice_title="약 드셨어요?",
         notice_sub=med_name,
+        cue="medicine",
     )
 
 
@@ -448,7 +520,8 @@ def medication_worker(face=None) -> None:
                     else:
                         text = f"{m['name']} 드실 시간이에요. 잊지 말고 꼭 챙겨 드세요."
                     _speak_when_free(
-                        text, face, notice_title="약 드실 시간이에요!", notice_sub=m["name"]
+                        text, face, notice_title="약 드실 시간이에요!", notice_sub=m["name"],
+                        cue="medicine",
                     )
                     # 앱이 아이콘·문구를 코드로 고르므로 한글이 아니라 코드로 남긴다.
                     report_activity("MEDICATION", m["name"])
@@ -557,6 +630,10 @@ def _deliver_chat(m: dict, face=None) -> None:
             elif image_url:
                 face.show_notice("사진이 왔어요", f"{sender}에게서", icon="message")
         try:
+            # 다른 방에 계셔도 첫마디를 놓치지 않게 먼저 주의를 끈다.
+            # 방해 금지 시간에는 소리로 깨우지 않는다.
+            if not in_dnd(device_settings["dnd"]):
+                _play_cue("message")
             if content:
                 speak(f"{sender}에게서 메시지가 왔어요. {content}")
             if image_url:
@@ -624,48 +701,82 @@ def post_elder_reply(text: str, wav_path: str | None = None) -> bool:
 def listen_for_reply(req: dict, stt, mic_wav: str, face=None) -> None:
     """가족 메시지를 읽어드린 뒤 답장을 여쭙고, 말씀하시면 대화방에 올린다.
 
+    답장은 보낸 사람 한 명이 아니라 가족 대화방에 올라간다. 문구도 그렇게
+    말씀드린다.
+
+    화면이 붙어 있으면 '답장하시겠어요?' 를 예/아니오로 먼저 여쭙고, 예를
+    누르셨을 때만 듣는다. 혼잣말이나 TV 소리가 답장으로 가 버리지 않게
+    하려는 것이다. 화면이 없으면 예전처럼 바로 말씀을 청한다.
+
     받아 적은 글과 말씀하신 목소리를 함께 올린다. 말씀이 없으면 조용히
     넘어간다 — 답장은 하셔도 되고 안 하셔도 된다.
     """
-    sender = req.get("sender") or "가족"
+    if face and face.has_screen():
+        # 묻는 말을 하기 전에 버튼부터 띄운다. 말 도중에 누르셔도 받는다.
+        ask_id = face.ask_show("답장하시겠어요?", "가족 대화방으로 보내드려요")
+        with speaker_lock:
+            speak("가족 대화방에 답장하시겠어요? 화면에서 예나 아니오를 눌러 주세요.")
+        answer = face.ask_wait(ask_id, timeout=REPLY_ASK_SEC)
+        print(f"💌 답장 여부: {answer or '응답 없음'}")
+        if answer != "yes":
+            if answer == "no":
+                with speaker_lock:
+                    speak("네, 알겠어요.")
+            _restore_photo_if_any(face)
+            return
+        prompt = "네, 말씀해 주세요. 목소리 그대로 보내드릴게요."
+    else:
+        prompt = (
+            "가족 대화방에 답장하시려면 지금 말씀해 주세요. "
+            "목소리 그대로 보내드릴게요."
+        )
 
-    with speaker_lock:
-        if face:
-            face.show_notice("답장하실 말씀이 있으면 해 주세요", f"{sender}에게", icon="message")
-        try:
+    # 안내는 듣는 동안에도 띄워 둔다. 안내나 사진이 얼굴을 덮으면 듣는 중
+    # 전구가 안 보여서, 지금 말씀하시면 된다는 걸 글로라도 알려야 한다.
+    if face:
+        face.show_notice("말씀해 주세요", "가족 대화방에 보낼 답장", icon="message")
+    try:
+        with speaker_lock:
             # 목소리가 그대로 간다는 걸 미리 말씀드린다.
-            speak(
-                f"{sender}에게 답장하시려면 지금 말씀해 주세요. "
-                "목소리 그대로 보내드릴게요."
+            speak(prompt)
+
+        recorder = LiveRecorder(
+            input_device_index=MIC_DEVICE_INDEX,
+            silence_end_ms=MIC_SILENCE_END_MS,
+        )
+        recording.set()
+        if face:
+            face.listen_start()
+        try:
+            wav_path = recorder.record_until_silence(
+                mic_wav, max_wait_seconds=REPLY_WAIT_SEC
             )
         finally:
+            recording.clear()
             if face:
-                face.hide_notice()
-
-    recorder = LiveRecorder(
-        input_device_index=MIC_DEVICE_INDEX,
-        silence_end_ms=MIC_SILENCE_END_MS,
-    )
-    recording.set()
-    if face:
-        face.listen_start()
-    try:
-        wav_path = recorder.record_until_silence(
-            mic_wav, max_wait_seconds=REPLY_WAIT_SEC
-        )
+                face.listen_stop()
     finally:
-        recording.clear()
         if face:
-            face.listen_stop()
+            face.hide_notice()
 
     if wav_path is None:
         print("💌 답장 없음")
+        if face:
+            _restore_photo_if_any(face)
         return
 
+    if face:
+        face.think_start()   # 받아 적고 올리는 동안
     text, _ = stt.transcribe(wav_path)
     text = (text or "").strip()
     print(f"💌 어르신 답장: {text}")
     if not text:
+        if face:
+            face.think_stop()
+        with speaker_lock:
+            speak("말씀을 잘 못 알아들었어요. 다음에 다시 해 주세요.")
+        if face:
+            _restore_photo_if_any(face)
         return
 
     # 답장에도 힘든 마음이 담길 수 있다. 대화와 같은 기준으로 알린다.
@@ -676,11 +787,40 @@ def listen_for_reply(req: dict, stt, mic_wav: str, face=None) -> None:
         ).start()
 
     sent = post_elder_reply(text, wav_path)
-    with speaker_lock:
-        speak(
-            f"{sender}에게 답장을 보냈어요." if sent
-            else "답장을 보내지 못했어요. 조금 뒤에 다시 해 주세요."
-        )
+    if face:
+        face.think_stop()
+    _tell_reply_result(sent, face)
+    if face:
+        _restore_photo_if_any(face)
+
+
+def _tell_reply_result(sent: bool, face=None) -> None:
+    """답장을 보냈는지 화면과 소리로 알린다.
+
+    보냈으면 체크 카드 + '띠리링' 을 띄운다. 말로만 하면 놓치시기 쉽고,
+    눈에 확 보이는 끝맺음이 있어야 '다 됐구나' 하고 마음을 놓으신다.
+    카드는 말이 짧게 끝나도 REPLY_RESULT_SEC 는 떠 있게 한다.
+    """
+    if face:
+        if sent:
+            face.show_notice("보냈어요!", "가족 대화방에 답장이 올라갔어요", icon="check")
+        else:
+            face.show_notice("못 보냈어요", "조금 뒤에 다시 해 주세요", icon="fail")
+    shown_at = time.monotonic()
+    try:
+        with speaker_lock:
+            if sent:
+                _play_cue("sent")
+            speak(
+                "가족 대화방에 답장을 보냈어요." if sent
+                else "답장을 보내지 못했어요. 조금 뒤에 다시 해 주세요."
+            )
+        left = REPLY_RESULT_SEC - (time.monotonic() - shown_at)
+        if face and left > 0:
+            time.sleep(left)
+    finally:
+        if face:
+            face.hide_notice()
 
 
 def chat_worker(face=None) -> None:
@@ -893,6 +1033,15 @@ def main() -> None:
         except Exception as e:
             print(f"⚠️  표정 디스플레이 비활성화: {e}")
 
+    # 🔔 효과음. 워커들이 쓰기 전에 만들어 둔다.
+    _prepare_cues()
+    if face:
+        # 화면을 누르시면 바로 '톡'. 눌렸는지 확신을 못 하시면 여러 번, 세게 누르신다.
+        face.on_answer = lambda _answer: threading.Thread(
+            target=_play_cue_if_free, args=("tap",), daemon=True
+        ).start()
+        face.on_touch = _on_face_touch
+
     # 💬 대화중 보고 워커 (웨이크워드 직후 보고가 녹음을 막지 않게 따로 보낸다)
     threading.Thread(target=conversation_worker, daemon=True).start()
 
@@ -952,6 +1101,10 @@ def main() -> None:
                     # 알아들었다는 걸 바로 보여준다. 소리만으로는 어르신도
                     # 옆에서 보는 가족도 웨이크워드가 먹었는지 알 수 없다.
                     face.set_expression("경청")
+                # 알아들었다는 '띵'. 녹음보다 먼저 끝까지 낸다 — 녹음 중에 울리면
+                # 마이크가 이 소리를 말씀으로 알아듣는다.
+                with speaker_lock:
+                    _play_cue("wake")
                 conversation_active = True
                 turns_this_session = 0
                 report_conversation(True)   # 웨이크워드~ = 대화중 시작
@@ -983,6 +1136,9 @@ def main() -> None:
                         on_speech_start=(on_start if emotion_svc else None),
                         on_speech_end=(on_end if emotion_svc else None),
                         max_wait_seconds=CONVERSATION_IDLE_TIMEOUT_SEC,
+                        # 듣는 동안 목소리에 맞춰 전구가 밝아지고, 쉬실 때 끄덕인다.
+                        on_level=(face.listen_level if face else None),
+                        on_pause=(face.nod if face else None),
                     )
             finally:
                 recording.clear()
@@ -992,6 +1148,8 @@ def main() -> None:
 
             if wav_path is None:
                 print("💤 대화를 종료하고 웨이크워드 대기로 돌아갑니다.")
+                # 이제 안 듣는다는 걸 알린다. 모르시고 계속 말을 거시지 않게.
+                _play_cue_if_free("bye")
                 conversation_active = False
                 conv_session_id = None       # 세션 종료
                 report_conversation(False)   # 대화중 종료
@@ -1003,11 +1161,21 @@ def main() -> None:
                     turns_this_session = 0
                 continue
 
+            # 다 들었다는 표시. 답이 나오기까지(STT~LLM~TTS 첫소리) 몇 초 비는
+            # 동안 효과음 한 번 + 생각하는 얼굴로 채운다. 얼굴은 말을 시작하면 그친다.
+            if face:
+                face.think_start()
+            threading.Thread(
+                target=_play_cue_if_free, args=("heard",), daemon=True
+            ).start()
+
             # ② STT
             with timed("STT", timings):
                 user_text, stt_elapsed = stt.transcribe(wav_path)
             print(f"🗣️  이용자: {user_text}   ({stt_elapsed:.2f}s)")
             if not user_text:
+                if face:
+                    face.think_stop()
                 continue
 
             # ②-1 안전 판별. LLM 을 부르기 전에 한 번 거른다.
@@ -1103,6 +1271,8 @@ def main() -> None:
         except Exception as e:
             consecutive_errors += 1
             print(f"❌ 에러: {e}")
+            if face:
+                face.think_stop()   # 생각하는 얼굴로 굳어 있지 않게
             if consecutive_errors >= 5:
                 print("⛔ 같은 에러가 반복됩니다. 마이크 장치(MIC_DEVICE_INDEX) 설정을 확인하세요. 종료합니다.")
                 break
