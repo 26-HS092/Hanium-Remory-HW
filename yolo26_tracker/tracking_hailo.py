@@ -29,11 +29,22 @@ TILT_CENTER = 108
 TILT_MIN = 88
 TILT_MAX = 158
 
+# 카메라 (IMX219 = Pi Camera v2)
+# 640x480 센서 모드는 가운데만 잘라 써서 화각이 24°밖에 안 된다.
+# 전체 화면 모드(1640x1232)를 받아 줄여 써야 원래 화각 62°가 나온다.
+FRAME_SIZE = (640, 480)
+SENSOR_SIZE = (1640, 1232)
+HFOV = 62.2         # 가로 화각 (도)
+VFOV = 48.8         # 세로 화각 (도)
+DEG_PER_PX_X = HFOV / FRAME_SIZE[0]
+DEG_PER_PX_Y = VFOV / FRAME_SIZE[1]
+
 # 추적 설정
-DEAD_ZONE = 35       # 중앙 부근에서는 움직이지 않음
-GAIN = 0.03         # 오차에 따른 이동량
-MAX_STEP = 3.0      # 한 번에 이동할 최대 각도
-SMOOTHING = 0.4     # 작을수록 부드럽지만 반응이 느림
+DEAD_ZONE = 25       # 중앙 부근(픽셀)에서는 움직이지 않음
+KP = 0.4             # 한 프레임에 남은 각도 오차의 몇 %를 줄일지
+MAX_SPEED = 90.0     # 최대 회전 속도 (도/초)
+SMOOTHING = 0.6      # 작을수록 부드럽지만 반응이 느림
+AIM_Y_RATIO = 0.3    # 박스 위에서 이 비율 지점(가슴~얼굴)을 화면 중앙에 맞춤
 
 # 방향이 반대라면 해당 값을 -1로 변경
 PAN_DIRECTION = 1
@@ -212,14 +223,15 @@ class FrameStream:
         self.server.server_close()
 
 
-def correction(error):
-    if abs(error) <= DEAD_ZONE:
+def correction(error_px, deg_per_px, dt):
+    """픽셀 오차를 각도로 바꿔 이번 프레임에 움직일 각도를 정한다."""
+    if abs(error_px) <= DEAD_ZONE:
         return 0.0
 
-    remaining = abs(error) - DEAD_ZONE
-    step = min(remaining * GAIN, MAX_STEP)
+    remaining = (abs(error_px) - DEAD_ZONE) * deg_per_px
+    step = min(remaining * KP, MAX_SPEED * dt)
 
-    return step if error > 0 else -step
+    return step if error_px > 0 else -step
 
 
 def send_angles(arduino, pan, tilt):
@@ -291,8 +303,9 @@ def main():
             camera.create_video_configuration(
                 main={
                     "format": "RGB888",
-                    "size": (640, 480),
+                    "size": FRAME_SIZE,
                 },
+                sensor={"output_size": SENSOR_SIZE},
                 buffer_count=2,
             )
         )
@@ -357,7 +370,7 @@ def main():
                 )
 
                 target_x = (x1 + x2) // 2
-                target_y = (y1 + y2) // 2
+                target_y = round(y1 + (y2 - y1) * AIM_Y_RATIO)
 
                 # 탐지 중심 좌표의 흔들림 완화
                 if smooth_x is None:
@@ -375,13 +388,17 @@ def main():
                 error_y = smooth_y - screen_y
 
                 pan = clamp(
-                    pan + PAN_DIRECTION * correction(error_x),
+                    pan + PAN_DIRECTION * correction(
+                        error_x, DEG_PER_PX_X, dt
+                    ),
                     PAN_MIN,
                     PAN_MAX,
                 )
 
                 tilt = clamp(
-                    tilt + TILT_DIRECTION * correction(error_y),
+                    tilt + TILT_DIRECTION * correction(
+                        error_y, DEG_PER_PX_Y, dt
+                    ),
                     TILT_MIN,
                     TILT_MAX,
                 )
@@ -535,7 +552,7 @@ def main():
                 TEMP_PATH.replace(RESULT_PATH)
                 last_image_save = now
 
-            time.sleep(0.02)
+            # capture_array()가 다음 프레임까지 기다리므로 따로 쉬지 않음
 
     except KeyboardInterrupt:
         print("\n추적 종료")
