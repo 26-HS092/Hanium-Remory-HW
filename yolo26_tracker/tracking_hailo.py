@@ -58,6 +58,11 @@ SCAN_SPEED = 30.0     # 탐색 회전 속도 (도/초)
 CONFIRM_FRAMES = 2    # 연속 몇 프레임 보여야 사람으로 확정할지
 LOST_TIMEOUT = 2.0    # 추적 중 이 시간(초) 동안 안 보이면 다시 탐색
 
+# 화면 밖으로 나갈 때 따라가기
+EDGE_MARGIN = 5       # 박스가 화면 끝에서 이 픽셀 안이면 잘린 것으로 봄
+EDGE_SIDE_RATIO = 0.25  # 중앙에서 화면 너비 x 이 값보다 멀리서 놓치면 그쪽으로 나간 것
+CHASE_SPEED = 60.0    # 놓친 쪽으로 계속 돌아가는 속도 (도/초)
+
 # 여러 명일 때 한 사람 고정 설정
 LOCK_TIMEOUT = 1.0    # 고정한 사람이 이 시간(초) 동안 안 보이면 다른 사람으로 바꿈
 MATCH_GATE = 1.0      # 이전 위치에서 (박스 너비 x 이 값) 넘게 떨어진 박스는 다른 사람
@@ -323,8 +328,19 @@ class TargetLock:
         for index, box in enumerate(boxes):
             cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
             distance = np.hypot(cx - prev_cx, cy - prev_cy) / prev_w
-            if distance > MATCH_GATE:
+            # 한 명만 보이면 헷갈릴 사람이 없으므로
+            # (빠르게 움직였거나 카메라가 돌며 쫓아간 경우)
+            # 위치가 많이 달라도 옷 색만 맞으면 같은 사람으로 봄
+            relaxed = len(boxes) == 1
+            if distance > MATCH_GATE and not relaxed:
                 continue
+
+            if relaxed and self.hist is not None:
+                hist = torso_histogram(frame, box)
+                if hist is not None and cv2.compareHist(
+                    self.hist, hist, cv2.HISTCMP_CORREL
+                ) < MIN_HIST_SIM:
+                    continue
 
             score = box_iou(self.box, box) - 0.5 * distance
 
@@ -377,6 +393,7 @@ def main():
     # "scan": 좌우로 돌며 찾기, "track": 찾은 사람 추적
     mode = "scan"
     scan_direction = 1
+    lost_side = 0         # 대상이 마지막으로 있던 쪽 (-1 왼쪽, 1 오른쪽, 0 가운데)
     lock = TargetLock()
     seen_frames = 0
     last_seen = 0.0
@@ -469,6 +486,9 @@ def main():
 
             elif mode == "track" and now - last_seen > LOST_TIMEOUT:
                 mode = "scan"
+                # 나간 쪽부터 찾아봄
+                if lost_side != 0:
+                    scan_direction = PAN_DIRECTION * lost_side
                 print("사람 놓침: 다시 탐색", flush=True)
 
             target_index = None
@@ -482,6 +502,22 @@ def main():
 
                 target_x = (x1 + x2) // 2
                 target_y = round(y1 + (y2 - y1) * AIM_Y_RATIO)
+
+                # 화면 끝에 걸려 잘린 박스는 중심이 안쪽으로 치우치므로
+                # 잘린 쪽 끝을 조준해서 더 빨리 돌아감
+                at_left = x1 <= EDGE_MARGIN
+                at_right = x2 >= width - 1 - EDGE_MARGIN
+                if at_left and not at_right:
+                    target_x = x1
+                elif at_right and not at_left:
+                    target_x = x2
+                if y1 <= EDGE_MARGIN:
+                    target_y = y1
+
+                if abs(target_x - screen_x) > width * EDGE_SIDE_RATIO:
+                    lost_side = 1 if target_x > screen_x else -1
+                else:
+                    lost_side = 0
 
                 # 탐지 중심 좌표의 흔들림 완화
                 if smooth_x is None:
@@ -530,7 +566,18 @@ def main():
                 # (다른 사람만 보여도 LOCK_TIMEOUT 동안은 넘어가지 않음)
                 smooth_x = None
                 smooth_y = None
-                target_status = "대상 안 보임: 각도 유지"
+
+                if lost_side != 0:
+                    # 화면 밖으로 나갔으면 나간 쪽으로 계속 돌아감
+                    pan = clamp(
+                        pan + PAN_DIRECTION * lost_side * CHASE_SPEED * dt,
+                        PAN_MIN,
+                        PAN_MAX,
+                    )
+                    side = "오른쪽" if lost_side > 0 else "왼쪽"
+                    target_status = f"대상 놓침: {side}으로 따라감"
+                else:
+                    target_status = "대상 안 보임: 각도 유지"
 
             else:
                 # 좌우 끝까지 돌고 방향 전환, 틸트는 중앙
