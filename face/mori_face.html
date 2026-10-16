@@ -128,11 +128,19 @@
     "슬픔":{eyeScaleY:0.88,inner:0.00,outer:0.28,happy:0.00,gazeY: 0.12,smile:-0.22,mouthOpen:0.04,tilt:0,sleep:0,col:[190,208,240],kick:0.5},
     "위로":{eyeScaleY:0.66,inner:0.00,outer:0.00,happy:0.00,gazeY: 0.00,smile: 0.45,mouthOpen:0.04,tilt:7,sleep:0,col:[255,194,174],kick:0.6},
     "경청":{eyeScaleY:1.04,inner:0.00,outer:0.00,happy:0.00,gazeY:-0.02,smile: 0.18,mouthOpen:0.05,tilt:4,sleep:0,col:[196,232,222],kick:0.7},
-    "놀람":{eyeScaleY:1.22,inner:0.00,outer:0.00,happy:0.00,gazeY:-0.05,smile: 0.20,mouthOpen:0.18,tilt:0,sleep:0,col:[182,236,220],kick:0.9},
+    // 놀람: 눈이 세로로 긴 타원으로 커지고 입은 작은 'o'. 확 튀어 보이게 kick 을 세게 준다.
+    "놀람":{eyeScaleY:1.25,inner:0.00,outer:0.00,happy:0.00,gazeY:-0.05,smile: 0.00,mouthOpen:0.30,tilt:0,sleep:0,col:[182,236,220],kick:1.4,
+           round:1,eyeW:1.10,mouthO:1},
     "수면":{eyeScaleY:0.40,inner:0.00,outer:0.00,happy:1.00,gazeY: 0.04,smile: 0.08,mouthOpen:0.03,tilt:0,sleep:1,col:[206,186,162],kick:0.3}
   };
-  var keys=["eyeScaleY","inner","outer","happy","gazeY","smile","mouthOpen","tilt","sleep"];
-  var cur={},vel={},tgt={};keys.forEach(function(k){cur[k]=E["평온"][k];vel[k]=0;tgt[k]=E["평온"][k];});
+  var keys=["eyeScaleY","inner","outer","happy","gazeY","smile","mouthOpen","tilt","sleep","round","eyeW","mouthO"];
+  // 몇몇 표정만 쓰는 값. 표정에 없으면 이 값으로 둔다.
+  //   round  눈이 둥근 사각형(0)에서 타원(1)으로
+  //   eyeW   눈 너비 배율
+  //   mouthO 입이 작은 'o' 로 오므라드는 정도
+  var DEF={round:0,eyeW:1,mouthO:0};
+  function pv(p,k){return p[k]!=null?p[k]:DEF[k];}
+  var cur={},vel={},tgt={};keys.forEach(function(k){cur[k]=pv(E["평온"],k);vel[k]=0;tgt[k]=pv(E["평온"],k);});
   cur.col=E["평온"].col.slice(); tgt.col=E["평온"].col.slice();
   var pop=1,vpop=0;
   var speaking=false,speakAmt=0,speechEnv=0,sylTarget=0,nextSyl=0;
@@ -152,7 +160,7 @@
   // 생각하는 중. thinkAmt 도 켜짐/꺼짐 사이를 부드럽게 오간다.
   var thinking=false,thinkAmt=0;
 
-  function applyEmotion(n){var p=E[n];if(!p)return;keys.forEach(function(k){tgt[k]=p[k];});tgt.col=p.col.slice();vpop+=p.kick;}
+  function applyEmotion(n){var p=E[n];if(!p)return;keys.forEach(function(k){tgt[k]=pv(p,k);});tgt.col=p.col.slice();vpop+=p.kick;}
   function setEmotion(n){if(!E[n])return;baseEmo=n;if(!reacting)applyEmotion(n);}
 
   // ── 가족 사진 표시/숨김 ──
@@ -293,11 +301,15 @@
   var ECL={x:150,y:116},ECR={x:270,y:116},HW=38,HH=52,R=14;
   var MX0=176,MX1=244,MID=210,MY=214,CX=210,CY=160;
   function spring(k,dt){var a=120*(tgt[k]-cur[k])-16*vel[k];vel[k]+=a*dt;cur[k]+=vel[k]*dt;}
-  function eyePath(cx,cy,hh,tlY,trY){var x0=cx-HW,x1=cx+HW,yb=cy+hh,r=Math.min(R,hh*0.6);
-    return "M"+(x0+r)+","+tlY+" L"+(x1-r)+","+trY+" Q"+x1+","+trY+" "+x1+","+(trY+r)+" L"+x1+","+(yb-r)+
-      " Q"+x1+","+yb+" "+(x1-r)+","+yb+" L"+(x0+r)+","+yb+" Q"+x0+","+yb+" "+x0+","+(yb-r)+
-      " L"+x0+","+(tlY+r)+" Q"+x0+","+tlY+" "+(x0+r)+","+tlY+" Z";}
-  function archPath(cx,cy,hh){return "M"+(cx-HW)+","+(cy+hh*0.35)+" Q"+cx+","+(cy-hh*0.95)+" "+(cx+HW)+","+(cy+hh*0.35);}
+  // 모서리는 타원호(3차 곡선)로 그린다. 가로 rx·세로 ry 가 각각 너비·높이의
+  // 절반이 되면 눈 전체가 타원이 된다.
+  function eyePath(cx,cy,hw,hh,rx,ry,tlY,trY){var x0=cx-hw,x1=cx+hw,yb=cy+hh,kx=0.4477*rx,ky=0.4477*ry;
+    return "M"+(x0+rx)+","+tlY+" L"+(x1-rx)+","+trY+
+      " C"+(x1-kx)+","+trY+" "+x1+","+(trY+ky)+" "+x1+","+(trY+ry)+" L"+x1+","+(yb-ry)+
+      " C"+x1+","+(yb-ky)+" "+(x1-kx)+","+yb+" "+(x1-rx)+","+yb+" L"+(x0+rx)+","+yb+
+      " C"+(x0+kx)+","+yb+" "+x0+","+(yb-ky)+" "+x0+","+(yb-ry)+" L"+x0+","+(tlY+ry)+
+      " C"+x0+","+(tlY+ky)+" "+(x0+kx)+","+tlY+" "+(x0+rx)+","+tlY+" Z";}
+  function archPath(cx,cy,hw,hh){return "M"+(cx-hw)+","+(cy+hh*0.35)+" Q"+cx+","+(cy-hh*0.95)+" "+(cx+hw)+","+(cy+hh*0.35);}
   function set(id,a,v){document.getElementById(id).setAttribute(a,v);}
   var ZA=[{x:292,y:78,s:17},{x:312,y:58,s:23},{x:334,y:36,s:31}];
   var lastBlink=performance.now()+2000,lastSac=performance.now()+1200,prev=performance.now();
@@ -367,19 +379,24 @@
     document.getElementById("ink").setAttribute("transform",
       "translate(0 "+nodY.toFixed(2)+") translate("+CX+" "+CY+") rotate("+tilt+") scale("+pop+") translate("+(-CX)+" "+(-CY)+")");
 
+    // 타원 눈(round)은 모서리를 너비·높이 끝까지 둥글린다. 깜빡일 땐 납작한 타원이 된다.
+    var rd=Math.max(0,Math.min(1,cur.round)),hw=HW*cur.eyeW;
     var hh=Math.max(2,HH*(cur.eyeScaleY+breathe)*(1-blink)*(1-0.1*thinkAmt));
+    var rN=Math.min(R,hh*0.6),erx=rN+(hw-rN)*rd,ery=rN+(hh-rN)*rd;
     var gx=igX*(1-thinkAmt)+thinkAmt*8*Math.sin(ts*0.9);
     var gy=cur.gazeY*22+igY*(1-thinkAmt)-thinkAmt*9+nodK*4,he=Math.max(0,Math.min(1,cur.happy));
     [["L",ECL],["R",ECR]].forEach(function(p){var s=p[0],c=p[1],cx=c.x+gx,cy=c.y+gy;
       var inCut=cur.inner*1.25*hh,outCut=cur.outer*1.25*hh,top=cy-hh;
       var tlY=(s==="L")?top+outCut:top+inCut,trY=(s==="L")?top+inCut:top+outCut;
-      set("eye"+s+"path","d",eyePath(cx,cy,hh,tlY,trY));set("eye"+s+"path","opacity",1-he);
-      set("arch"+s,"d",archPath(cx,cy,hh));set("arch"+s,"opacity",he);});
+      set("eye"+s+"path","d",eyePath(cx,cy,hw,hh,erx,ery,tlY,trY));set("eye"+s+"path","opacity",1-he);
+      set("arch"+s,"d",archPath(cx,cy,hw,hh));set("arch"+s,"opacity",he);});
 
     var renderOpen=cur.mouthOpen*(1-speakAmt)+speechEnv*speakAmt;
     var endY=MY-cur.smile*10,ctrlY=MY+cur.smile*16;
     set("mouthLine","d","M"+MX0+","+endY+" Q"+MID+","+ctrlY+" "+MX1+","+endY);
     var openF=Math.max(0,Math.min(1,(renderOpen-0.06)/0.18));set("mouthLine","opacity",1-openF);
+    // 'o' 입은 말하는 동안엔 풀어서 평소처럼 벌린다.
+    var mo=Math.max(0,Math.min(1,cur.mouthO))*(1-speakAmt);set("mouthOpen","rx",(24-11*mo).toFixed(2));
     var ry=5+renderOpen*20;set("mouthOpen","ry",ry);set("mouthOpen","cy",MY+ry);set("mouthOpen","opacity",openF);
 
     var r=Math.round(cur.col[0]),g2=Math.round(cur.col[1]),bl=Math.round(cur.col[2]),col="rgb("+r+","+g2+","+bl+")";
