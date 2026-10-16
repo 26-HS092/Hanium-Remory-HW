@@ -21,6 +21,15 @@ FRAMES_PER_UTTERANCE = 3
 CAM_HFLIP = os.getenv("CAM_HFLIP", "false").lower() == "true"
 CAM_VFLIP = os.getenv("CAM_VFLIP", "false").lower() == "true"
 
+# ── 얼굴 트래킹 방식 ────────────────────────────────────────
+# hailo = Pi 카메라 + Hailo 포즈 모델 + 아두이노 팬틸트 (yolo26_tracker/tracking_hailo.py)
+#         카메라는 트래커가 열고, 감정 인식은 트래커가 따라가는 사람 얼굴만 본다.
+#         트래커를 못 열면 아래 Pixy2 방식으로 넘어간다.
+# pixy  = Pixy2 팬틸트 (아래 설정들)
+TRACK_BACKEND = os.getenv("TRACK_BACKEND", "hailo").lower()
+# Hailo 트래커 화면을 브라우저로 보기: http://<파이 IP>:<포트>. 0 이면 끔.
+TRACK_STREAM_PORT = int(os.getenv("TRACK_STREAM_PORT", "0"))
+
 # ── 얼굴 트래킹 (Pixy2 팬틸트) ─────────────────────────────
 # 카메라(Pixy2 자신이든, 같은 틸트 플레이트에 붙인 Pi 카메라든)는 모터와 같이 돈다.
 # 그래서 카메라 화면 속 얼굴을 가운데로 맞추면 된다.

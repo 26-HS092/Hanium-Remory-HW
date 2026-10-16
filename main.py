@@ -150,9 +150,9 @@ except Exception as _e:                          # pragma: no cover
     print(f"⚠️  표정 표시 모듈 import 실패 → 표정 없이 동작: {_e}")
 
 try:
-    from face_tracker import create_tracker   # noqa: E402
+    from face_tracker import create_tracker, create_hailo_tracker   # noqa: E402
 except Exception as _e:                          # pragma: no cover
-    create_tracker = None
+    create_tracker = create_hailo_tracker = None
     print(f"⚠️  얼굴 트래킹 모듈 import 실패 → 트래킹 없이 동작: {_e}")
 
 
@@ -1113,17 +1113,24 @@ def main() -> None:
         input_device_index=WAKEWORD_DEVICE_INDEX,
     )
 
+    # 🎯 얼굴 트래킹 ①: Hailo 트래커(아두이노 팬틸트)는 Pi 카메라를 직접 열고,
+    #    감정 인식이 그 화면과 '따라가는 사람' 얼굴 위치를 같이 쓴다.
+    tracker = None
+    if create_hailo_tracker is not None:
+        tracker = create_hailo_tracker()
+
     emotion_svc = None
     if EmotionService is not None:
         try:
-            emotion_svc = EmotionService()
+            emotion_svc = EmotionService(
+                camera=tracker.shared_camera if tracker else None
+            )
             print("📷 감정 인식 활성화")
         except Exception as e:
             print(f"⚠️  감정 인식 비활성화(카메라/모델 초기화 실패): {e}")
 
-    # 🎯 얼굴 트래킹: Pixy2 팬틸트가 어르신 얼굴을 따라간다. 카메라는 감정 쪽과 공유.
-    tracker = None
-    if create_tracker is not None:
+    # 🎯 얼굴 트래킹 ②: Hailo 트래커가 없으면 Pixy2 팬틸트가 감정 쪽 카메라를 빌려 쓴다.
+    if tracker is None and create_tracker is not None:
         tracker = create_tracker(camera=emotion_svc.camera if emotion_svc else None)
 
     groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
