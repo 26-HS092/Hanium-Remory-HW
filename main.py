@@ -134,7 +134,7 @@ from conversation_log import ConversationLogger  # noqa: E402
 from groq import Groq                        # noqa: E402
 from mic_vad import LiveRecorder            # noqa: E402
 from audio_out import (                                                # noqa: E402
-    play_wav, synthesize_and_play_stream, make_chime_wav, CHIMES,
+    play_wav, synthesize_and_play_stream, make_chime_wav, CHIMES, LoopPlayer,
 )
 from wakeword import MoriyaWakeWordDetector
 try:
@@ -493,6 +493,49 @@ def _play_cue_if_free(name: str) -> None:
         speaker_lock.release()
 
 
+# 다 듣고 답을 만드는 동안 까는 음악. 원음은 효과음·목소리보다 커서 줄여 둔다.
+_loading_music = LoopPlayer(str(ROOT / "bgm" / "Loading.mp3"), volume=0.5)
+# 로딩 음악이 스피커를 쥐고 있는지. 메인 루프 스레드에서만 만진다.
+_loading_holds_speaker = False
+
+
+def _think_start(face=None) -> None:
+    """다 들었다 — 답을 만드는 동안 생각하는 얼굴을 짓고 로딩 음악을 깐다.
+
+    답이 나오기까지 몇 초 비는데 조용하면 못 알아들은 줄 아신다. 음악은
+    스피커가 비어 있을 때만 튼다(약 알림·가족 메시지를 끊지 않게). 트는 동안
+    스피커를 쥐고 있다가 _loading_stop 에서 놓는다.
+
+    메인 루프에서만 부른다. 쥔 잠금을 같은 스레드가 다시 잡으면 멈추므로,
+    말하기 전(with speaker_lock)에 반드시 _loading_stop 을 먼저 부른다.
+    """
+    global _loading_holds_speaker
+    if face:
+        face.think_start()
+    if _loading_holds_speaker or not speaker_lock.acquire(blocking=False):
+        return
+    _loading_holds_speaker = True
+    _loading_music.start()
+
+
+def _loading_stop() -> None:
+    """로딩 음악을 끄고 스피커를 놓는다. 얼굴은 그대로 둔다 — 말을 시작하면
+    화면이 알아서 생각하는 얼굴을 그친다."""
+    global _loading_holds_speaker
+    if not _loading_holds_speaker:
+        return
+    _loading_music.stop()
+    _loading_holds_speaker = False
+    speaker_lock.release()
+
+
+def _think_stop(face=None) -> None:
+    """생각하는 얼굴과 로딩 음악을 함께 그친다(말하지 않고 끝날 때)."""
+    if face:
+        face.think_stop()
+    _loading_stop()
+
+
 def _speak_when_free(
     text: str, face=None, notice_title: str | None = None, notice_sub: str = "",
     cue: str | None = None,
@@ -805,14 +848,12 @@ def listen_for_reply(req: dict, stt, mic_wav: str, face=None) -> None:
             _restore_photo_if_any(face)
         return
 
-    if face:
-        face.think_start()   # 받아 적고 올리는 동안
+    _think_start(face)   # 받아 적고 올리는 동안
     text, _ = stt.transcribe(wav_path)
     text = (text or "").strip()
     print(f"💌 어르신 답장: {text}")
     if not text:
-        if face:
-            face.think_stop()
+        _think_stop(face)
         with speaker_lock:
             speak("말씀을 잘 못 알아들었어요. 다음에 다시 해 주세요.")
         if face:
@@ -827,8 +868,7 @@ def listen_for_reply(req: dict, stt, mic_wav: str, face=None) -> None:
         ).start()
 
     sent = post_elder_reply(text, wav_path)
-    if face:
-        face.think_stop()
+    _think_stop(face)
     _tell_reply_result(sent, face)
     if face:
         _restore_photo_if_any(face)
@@ -1214,20 +1254,15 @@ def main() -> None:
                 continue
 
             # 다 들었다는 표시. 답이 나오기까지(STT~LLM~TTS 첫소리) 몇 초 비는
-            # 동안 효과음 한 번 + 생각하는 얼굴로 채운다. 얼굴은 말을 시작하면 그친다.
-            if face:
-                face.think_start()
-            threading.Thread(
-                target=_play_cue_if_free, args=("heard",), daemon=True
-            ).start()
+            # 동안 로딩 음악 + 생각하는 얼굴로 채운다. 얼굴은 말을 시작하면 그친다.
+            _think_start(face)
 
             # ② STT
             with timed("STT", timings):
                 user_text, stt_elapsed = stt.transcribe(wav_path)
             print(f"🗣️  이용자: {user_text}   ({stt_elapsed:.2f}s)")
             if not user_text:
-                if face:
-                    face.think_stop()
+                _think_stop(face)
                 continue
 
             # ②-1 안전 판별. LLM 을 부르기 전에 한 번 거른다.
@@ -1296,6 +1331,9 @@ def main() -> None:
             if face:
                 face.set_expression(robot_expr)
 
+            # 말하려면 스피커를 다시 잡아야 한다. 음악부터 끈다.
+            _loading_stop()
+
             # ⑤⑥ TTS 스트리밍 (speaker_lock 으로 약알림·채팅과 안 겹치게)
             #     기본 목소리로 지정된 화자(device_settings["spk_id"])로 말한다.
             try:
@@ -1323,13 +1361,15 @@ def main() -> None:
         except Exception as e:
             consecutive_errors += 1
             print(f"❌ 에러: {e}")
-            if face:
-                face.think_stop()   # 생각하는 얼굴로 굳어 있지 않게
+            _think_stop(face)   # 생각하는 얼굴·음악이 남아 있지 않게
             if consecutive_errors >= 5:
                 print("⛔ 같은 에러가 반복됩니다. 마이크 장치(MIC_DEVICE_INDEX) 설정을 확인하세요. 종료합니다.")
                 break
             time.sleep(0.5)
             continue
+
+    # 음악 재생기는 따로 도는 프로세스라, 끄지 않으면 종료 뒤에도 계속 울린다.
+    _loading_stop()
 
     # 어떤 이유로 멈추든 앱에 '대화중'이 남지 않게 한다.
     # 곧 프로세스가 끝나므로 대기열 대신 직접 보낸다.
