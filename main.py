@@ -1271,7 +1271,7 @@ def main() -> None:
                 reply, robot_expr = llm_out["reply"], llm_out["expression"]
 
                 # 규칙이 놓쳤거나 약하게 본 것을 LLM 이 더 급하게 봤으면 올린다.
-                upgraded = safety.escalate(risk, llm_out.get("risk"))
+                upgraded = safety.escalate(risk, llm_out.get("risk"), user_text)
                 if upgraded:
                     print(f"🛡️  안전 신호(LLM): {upgraded.kind}"
                           + (f" ← {risk.kind}" if risk else ""))
