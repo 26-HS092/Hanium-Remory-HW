@@ -1,6 +1,7 @@
 import signal
 import threading
 import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -67,10 +68,12 @@ SCAN_SPEED = 30.0     # 탐색 회전 속도 (도/초)
 CONFIRM_FRAMES = 2    # 연속 몇 프레임 보여야 사람으로 확정할지
 LOST_TIMEOUT = 2.0    # 추적 중 이 시간(초) 동안 안 보이면 다시 탐색
 
-# 화면 밖으로 나갈 때 따라가기
+# 놓쳤을 때 사라진 쪽으로 돌아보기
 EDGE_MARGIN = 5       # 박스가 화면 끝에서 이 픽셀 안이면 잘린 것으로 봄
-EDGE_SIDE_RATIO = 0.25  # 중앙에서 화면 너비 x 이 값보다 멀리서 놓치면 그쪽으로 나간 것
-CHASE_SPEED = 60.0    # 놓친 쪽으로 계속 돌아가는 속도 (도/초)
+HISTORY_TIME = 0.5    # 최근 이 시간(초) 동안의 얼굴 위치로 움직이던 속도를 구함
+LEAD_TIME = 0.7       # 사라진 뒤 그 속도로 이 시간(초)만큼 더 간 곳을 찾아봄
+MAX_LEAD = 25.0       # 속도로 예측해서 더 가 보는 최대 각도
+CHASE_SPEED = 60.0    # 그곳으로 돌아보는 속도 (도/초)
 
 # 여러 명일 때 한 사람 고정 설정
 LOCK_TIMEOUT = 1.0    # 고정한 사람이 이 시간(초) 동안 안 보이면 다른 사람으로 바꿈
@@ -388,6 +391,26 @@ def calibrate(camera, arduino):
     return tuple(result)
 
 
+def predict_lost_goal(history):
+    """최근 얼굴 각도 기록으로 사라진 사람이 지금쯤 있을 (pan, tilt)를 구한다."""
+    t0, pan0, tilt0 = history[0]
+    t1, pan1, tilt1 = history[-1]
+
+    lead_pan = lead_tilt = 0.0
+    if t1 - t0 >= 0.1:
+        lead_pan = (pan1 - pan0) / (t1 - t0) * LEAD_TIME
+        lead_tilt = (tilt1 - tilt0) / (t1 - t0) * LEAD_TIME
+
+    return (
+        clamp(pan1 + clamp(lead_pan, -MAX_LEAD, MAX_LEAD), PAN_MIN, PAN_MAX),
+        clamp(tilt1 + clamp(lead_tilt, -MAX_LEAD, MAX_LEAD), TILT_MIN, TILT_MAX),
+    )
+
+
+def step_toward(current, goal, max_step):
+    return current + clamp(goal - current, -max_step, max_step)
+
+
 def correction(error_px, deg_per_px, dt):
     """픽셀 오차를 각도로 바꿔 이번 프레임에 움직일 각도를 정한다."""
     if abs(error_px) <= DEAD_ZONE:
@@ -580,7 +603,9 @@ def main():
     # "scan": 좌우로 돌며 찾기, "track": 찾은 사람 추적
     mode = "scan"
     scan_direction = 1
-    lost_side = 0         # 대상이 마지막으로 있던 쪽 (-1 왼쪽, 1 오른쪽, 0 가운데)
+    # 최근 얼굴이 있던 서보 각도 기록 (시각, pan, tilt): 놓쳤을 때 갈 곳 예측용
+    face_history = deque()
+    lost_goal = None      # 놓친 뒤 돌아볼 (pan, tilt)
     lock = TargetLock()
     seen_frames = 0
     last_seen = 0.0
@@ -681,9 +706,13 @@ def main():
 
             elif mode == "track" and now - last_seen > LOST_TIMEOUT:
                 mode = "scan"
-                # 나간 쪽부터 찾아봄
-                if lost_side != 0:
-                    scan_direction = pan_dir * lost_side
+                # 사라진 쪽으로 계속 이어서 찾아봄
+                if lost_goal is not None and face_history:
+                    moved = lost_goal[0] - face_history[0][1]
+                    if abs(moved) >= 1:
+                        scan_direction = 1 if moved > 0 else -1
+                face_history.clear()
+                lost_goal = None
                 print("사람 놓침: 다시 탐색", flush=True)
 
             target_index = None
@@ -715,10 +744,15 @@ def main():
                     if y1 <= EDGE_MARGIN:
                         target_y = y1
 
-                if abs(target_x - screen_x) > width * EDGE_SIDE_RATIO:
-                    lost_side = 1 if target_x > screen_x else -1
-                else:
-                    lost_side = 0
+                # 얼굴이 있는 곳을 서보 각도로 기록 (이 프레임을 찍을 때의 각도 기준)
+                face_history.append((
+                    now,
+                    pan + pan_dir * (target_x - screen_x) * pan_deg_per_px,
+                    tilt + tilt_dir * (target_y - screen_y) * tilt_deg_per_px,
+                ))
+                while now - face_history[0][0] > HISTORY_TIME:
+                    face_history.popleft()
+                lost_goal = None
 
                 # 탐지 중심 좌표의 흔들림 완화
                 if smooth_x is None:
@@ -774,15 +808,22 @@ def main():
                 smooth_x = None
                 smooth_y = None
 
-                if lost_side != 0:
-                    # 화면 밖으로 나갔으면 나간 쪽으로 계속 돌아감
-                    pan = clamp(
-                        pan + pan_dir * lost_side * CHASE_SPEED * dt,
-                        PAN_MIN,
-                        PAN_MAX,
+                if lost_goal is None and face_history:
+                    # 마지막 위치 + 움직이던 방향으로 지금쯤 있을 곳
+                    lost_goal = predict_lost_goal(face_history)
+                    print(
+                        f"대상 놓침: 사라진 쪽 PAN {lost_goal[0]:.0f}, "
+                        f"TILT {lost_goal[1]:.0f}으로 돌아봄",
+                        flush=True,
                     )
-                    side = "오른쪽" if lost_side > 0 else "왼쪽"
-                    target_status = f"대상 놓침: {side}으로 따라감"
+
+                if lost_goal is not None:
+                    pan = step_toward(pan, lost_goal[0], CHASE_SPEED * dt)
+                    tilt = step_toward(tilt, lost_goal[1], CHASE_SPEED * dt)
+                    target_status = (
+                        f"대상 놓침: PAN {lost_goal[0]:.0f}, "
+                        f"TILT {lost_goal[1]:.0f} 쪽을 보는 중"
+                    )
                 else:
                     target_status = "대상 안 보임: 각도 유지"
 
