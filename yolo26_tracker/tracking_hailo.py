@@ -47,8 +47,16 @@ SMOOTHING = 0.6      # 작을수록 부드럽지만 반응이 느림
 HEAD_Y_RATIO = 0.1   # 얼굴·어깨가 안 보일 때 박스 위에서 이 비율 지점을 머리로 봄
 
 # 방향이 반대라면 해당 값을 -1로 변경
+# (AUTO_CALIBRATE가 켜져 있으면 시작할 때 직접 재서 덮어씀)
 PAN_DIRECTION = 1
 TILT_DIRECTION = -1
+
+# 시작할 때 서보를 살짝 돌려 화면이 밀리는 방향·거리로
+# 방향과 "서보 1도 = 화면 몇 픽셀"을 직접 잰다.
+# 카메라 앞이 무늬 없는 벽·천장이면 측정이 안 돼서 위 설정값을 그대로 씀
+AUTO_CALIBRATE = True
+CALIBRATE_STEP = 8          # 시험으로 돌려볼 각도
+CALIBRATE_MIN_INLIERS = 40  # 이만큼 특징점이 같은 방향으로 움직여야 믿음
 
 # 탐색 설정 (사람이 없을 때 좌우로 돌며 찾기)
 # 범위를 넓히려면 SCAN_MIN/SCAN_MAX와 PAN_MIN/PAN_MAX를 함께 바꿀 것
@@ -291,6 +299,94 @@ class FrameStream:
         self.server.server_close()
 
 
+def measure_shift(before, after):
+    """두 화면 사이의 평행 이동(픽셀)과 그걸 지지하는 특징점 수."""
+    orb = cv2.ORB_create(1500)
+    gray = [cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) for img in (before, after)]
+    kp1, des1 = orb.detectAndCompute(gray[0], None)
+    kp2, des2 = orb.detectAndCompute(gray[1], None)
+    if des1 is None or des2 is None:
+        return None, 0
+
+    matches = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True).match(des1, des2)
+    if len(matches) < CALIBRATE_MIN_INLIERS:
+        return None, 0
+
+    src = np.float32([kp1[m.queryIdx].pt for m in matches])
+    dst = np.float32([kp2[m.trainIdx].pt for m in matches])
+    affine, inliers = cv2.estimateAffinePartial2D(
+        src, dst, method=cv2.RANSAC, ransacReprojThreshold=4.0
+    )
+    if affine is None:
+        return None, 0
+
+    return affine[:, 2], int(inliers.sum())
+
+
+def calibrate(camera, arduino):
+    """서보를 살짝 돌려 보고 방향과 서보 1도당 픽셀 수를 잰다.
+
+    반환: (pan_dir, tilt_dir, pan_deg_per_px, tilt_deg_per_px)
+    측정이 안 된 축은 설정값(PAN_DIRECTION 등)을 그대로 쓴다.
+    """
+    result = [PAN_DIRECTION, TILT_DIRECTION, DEG_PER_PX_X, DEG_PER_PX_Y]
+
+    def shot(pan, tilt):
+        command, reply, success = send_angles(arduino, pan, tilt)
+        if not success:
+            raise RuntimeError(f"보정 중 아두이노 응답 이상: {reply!r}")
+        time.sleep(0.6)
+        for _ in range(3):  # 서보가 멈춘 뒤 프레임을 받도록 버퍼 비우기
+            frame = camera.capture_array()
+        return frame
+
+    tests = [
+        # (축 이름, 결과 위치, 움직인 각도, 화면 축)
+        ("PAN", 0, (PAN_CENTER + CALIBRATE_STEP, TILT_CENTER), 0),
+        ("TILT", 1, (PAN_CENTER, TILT_CENTER + CALIBRATE_STEP), 1),
+    ]
+
+    for name, index, moved, axis in tests:
+        before = shot(PAN_CENTER, TILT_CENTER)
+        after = shot(*moved)
+        shift, inliers = measure_shift(before, after)
+
+        if shift is None or inliers < CALIBRATE_MIN_INLIERS:
+            print(f"{name} 보정 실패 (특징점 부족): 설정값 사용", flush=True)
+            continue
+
+        px = shift[axis]
+        px_per_deg = abs(px) / CALIBRATE_STEP
+        if abs(shift[1 - axis]) > abs(px):
+            print(
+                f"{name} 보정 실패 (화면이 엉뚱한 방향으로 밀림 "
+                f"x={shift[0]:.0f}, y={shift[1]:.0f}px): "
+                "카메라가 돌아가 달렸는지 확인. 설정값 사용",
+                flush=True,
+            )
+            continue
+        if px_per_deg < 3:
+            print(
+                f"{name} 보정 실패 (화면이 거의 안 움직임 {px:.0f}px): "
+                "카메라가 거치대에 달려 있는지 확인. 설정값 사용",
+                flush=True,
+            )
+            continue
+
+        # 서보 각도를 +로 바꿨을 때 화면이 +쪽(오른쪽/아래)으로 밀리면
+        # 대상이 오른쪽/아래에 있을 때 각도를 -로 바꿔야 가운데로 온다
+        result[index] = -1 if px > 0 else 1
+        result[index + 2] = 1 / px_per_deg
+        print(
+            f"{name} 보정: 방향 {result[index]:+d}, "
+            f"서보 1도 = {px_per_deg:.1f}px (특징점 {inliers}개)",
+            flush=True,
+        )
+
+    shot(PAN_CENTER, TILT_CENTER)
+    return tuple(result)
+
+
 def correction(error_px, deg_per_px, dt):
     """픽셀 오차를 각도로 바꿔 이번 프레임에 움직일 각도를 정한다."""
     if abs(error_px) <= DEAD_ZONE:
@@ -526,6 +622,13 @@ def main():
         camera_started = True
         time.sleep(1)
 
+        pan_dir, tilt_dir = PAN_DIRECTION, TILT_DIRECTION
+        pan_deg_per_px, tilt_deg_per_px = DEG_PER_PX_X, DEG_PER_PX_Y
+        if AUTO_CALIBRATE:
+            pan_dir, tilt_dir, pan_deg_per_px, tilt_deg_per_px = calibrate(
+                camera, arduino
+            )
+
         print("사람 추적 시작 (Hailo HAT)")
         print("대상: 가장 크게 보이는 사람 한 명의 얼굴 (고르면 고정)")
         print(f"탐색 범위: PAN {SCAN_MIN}~{SCAN_MAX}")
@@ -571,7 +674,7 @@ def main():
                 mode = "scan"
                 # 나간 쪽부터 찾아봄
                 if lost_side != 0:
-                    scan_direction = PAN_DIRECTION * lost_side
+                    scan_direction = pan_dir * lost_side
                 print("사람 놓침: 다시 탐색", flush=True)
 
             target_index = None
@@ -624,16 +727,16 @@ def main():
                 error_y = smooth_y - screen_y
 
                 pan = clamp(
-                    pan + PAN_DIRECTION * correction(
-                        error_x, DEG_PER_PX_X, dt
+                    pan + pan_dir * correction(
+                        error_x, pan_deg_per_px, dt
                     ),
                     PAN_MIN,
                     PAN_MAX,
                 )
 
                 tilt = clamp(
-                    tilt + TILT_DIRECTION * correction(
-                        error_y, DEG_PER_PX_Y, dt
+                    tilt + tilt_dir * correction(
+                        error_y, tilt_deg_per_px, dt
                     ),
                     TILT_MIN,
                     TILT_MAX,
@@ -660,7 +763,7 @@ def main():
                 if lost_side != 0:
                     # 화면 밖으로 나갔으면 나간 쪽으로 계속 돌아감
                     pan = clamp(
-                        pan + PAN_DIRECTION * lost_side * CHASE_SPEED * dt,
+                        pan + pan_dir * lost_side * CHASE_SPEED * dt,
                         PAN_MIN,
                         PAN_MAX,
                     )
