@@ -51,3 +51,6 @@ emotion/train/data/
 # Pixy2 SWIG 바인딩 (파이에서 직접 빌드)
 emotion/pixy.py
 emotion/_pixy*.so
+
+# 외부 저장소 (hailo-ai/hailo-apps 를 받아 둔 것)
+hailo-apps/
