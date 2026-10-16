@@ -49,6 +49,20 @@ class Camera:
             pass
 
 
+def create_camera():
+    """config.CAMERA_SOURCE 대로 카메라를 연다. Pixy2 가 안 되면 Pi 카메라로."""
+    if config.CAMERA_SOURCE == "pixy":
+        try:
+            from pixy_camera import PixyCamera
+            cam = PixyCamera()
+            print("📷 카메라: Pixy2 센서 (316x208)")
+            return cam
+        except Exception as e:
+            print(f"⚠️  Pixy2 카메라 실패 → Pi 카메라로: {e}")
+    print("📷 카메라: Pi 카메라")
+    return Camera()
+
+
 class _HSEmotionClassifier:
     """HSEmotion(AffectNet 8감정). 모델은 ~/.hsemotion/ 에서 로드."""
 

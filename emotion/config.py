@@ -11,7 +11,10 @@ FERPLUS_PATH = os.path.join(MODELS_DIR, "ferplus.onnx")   # (구) FER+ — 미�
 HSEMOTION_MODEL = "enet_b0_8_best_afew"
 
 # ── 카메라 ────────────────────────────────────────────────
-CAM_SIZE     = (1280, 720)   # 캡처 해상도
+# pixy = Pixy2 센서 영상(316x208, pixy_camera.py) / picam = Pi 카메라(picamera2)
+# Pixy2 를 못 열면 Pi 카메라로 넘어간다.
+CAMERA_SOURCE = os.getenv("CAMERA_SOURCE", "pixy").lower()
+CAM_SIZE     = (1280, 720)   # Pi 카메라 캡처 해상도
 # 발화 1회 동안 얼굴 프레임 몇 장을 뜰지 (다수결용). 캡처 자체는 가벼움.
 FRAMES_PER_UTTERANCE = 3
 # 카메라를 거꾸로/옆으로 달았으면 여기서 뒤집는다. 감정 모델은 똑바로 선 얼굴을 기대한다.
@@ -19,10 +22,11 @@ CAM_HFLIP = os.getenv("CAM_HFLIP", "false").lower() == "true"
 CAM_VFLIP = os.getenv("CAM_VFLIP", "false").lower() == "true"
 
 # ── 얼굴 트래킹 (Pixy2 팬틸트) ─────────────────────────────
-# Pi 카메라는 Pixy2 와 같은 틸트 플레이트에 붙어 있다고 가정한다.
-# 모터가 돌면 카메라도 같이 돌기 때문에, 카메라 화면 속 얼굴을 가운데로 맞추면 된다.
+# 카메라(Pixy2 자신이든, 같은 틸트 플레이트에 붙인 Pi 카메라든)는 모터와 같이 돈다.
+# 그래서 카메라 화면 속 얼굴을 가운데로 맞추면 된다.
 TRACK_ENABLED = os.getenv("TRACK_ENABLED", "true").lower() == "true"
-# face = Pi 카메라 + YuNet 얼굴 검출(기본) / pixy = Pixy2 색 시그니처(피부색·마커)
+# face = 카메라 영상 + YuNet 얼굴 검출(기본) / pixy = Pixy2 색 시그니처(피부색·마커)
+# CAMERA_SOURCE=pixy 면 Pixy2 프로그램이 멈춰 있어 색 시그니처를 못 쓴다 → face 로 동작.
 TRACK_SOURCE  = os.getenv("TRACK_SOURCE", "face").lower()
 PIXY_SIGNATURES = (1, 2, 3)        # TRACK_SOURCE=pixy 일 때 따라갈 시그니처 번호
 TRACK_DETECT_WIDTH = 320           # 트래킹용 검출은 축소 프레임에서 (빠르게)

@@ -1,0 +1,88 @@
+diff --git a/src/host/libpixyusb2_examples/python_demos/pixy.i b/src/host/libpixyusb2_examples/python_demos/pixy.i
+index ddb017f..0b68554 100644
+--- a/src/host/libpixyusb2_examples/python_demos/pixy.i
++++ b/src/host/libpixyusb2_examples/python_demos/pixy.i
+@@ -4,6 +4,7 @@
+ %include "stdint.i"
+ %include "carrays.i"
+ %include "typemaps.i"
++%include "pybuffer.i"
+ 
+ %{
+ #define SWIG_FILE_WITH_INIT
+@@ -91,6 +92,19 @@ extern void set_lamp (int upper, int lower);
+ extern void set_servos (int  S1_Position, int  S2_Position);
+ %}
+ 
++%pybuffer_mutable_binary(char *  buf, size_t  len);
++%inline %{
++/*! Pause Pixy's program so raw frames can be grabbed. Call video_resume() after. */
++extern int video_stop ();
++extern int video_resume ();
++/*!
++  @brief  Copy a Bayer (BGGR) frame window into a writable buffer (e.g. bytearray).
++  @param  type  (res<<4)|mode: 0x21 = 316x208, 0x11 = 640x400, 0x00 = 1280x800
++  @return bytes copied (w*h), negative on error. Requires video_stop() first.
++*/
++extern int video_get_frame (int type, int x, int y, int w, int h, char *  buf, size_t  len);
++%}
++
+ %apply uint8_t *OUTPUT { uint8_t *  Red, uint8_t *  Green, uint8_t *  Blue};
+ %inline %{
+ /*!
+@@ -161,4 +175,4 @@ struct Barcode
+   int16_t getLineAngle(int i) {
+         return $self->m_intLines[i].m_angle;
+     }
+-}
+\ No newline at end of file
++}
+\ No newline at end of file
+diff --git a/src/host/libpixyusb2_examples/python_demos/pixy_python_interface.cpp b/src/host/libpixyusb2_examples/python_demos/pixy_python_interface.cpp
+index b63d388..50dd301 100644
+--- a/src/host/libpixyusb2_examples/python_demos/pixy_python_interface.cpp
++++ b/src/host/libpixyusb2_examples/python_demos/pixy_python_interface.cpp
+@@ -119,3 +119,43 @@ void set_servos (int  S1_Position, int  S2_Position)
+ {
+   pixy_instance.setServos (S1_Position, S2_Position);
+ }
++
++// ── Raw frame (Remory) ──────────────────────────────────────
++// libpixyusb2 get_raw_frame 예제와 같은 방식. video_stop() 뒤에만 프레임을 받을 수 있고,
++// 멈춘 동안에는 여러 번 불러도 된다. 끝나면 video_resume().
++
++int video_stop ()
++{
++  return pixy_instance.m_link.stop();
++}
++
++int video_resume ()
++{
++  return pixy_instance.m_link.resume();
++}
++
++// 센서 프레임(또는 그 일부 창)을 Bayer 원본 그대로 buf 에 복사한다. 1바이트/픽셀.
++//   type: (해상도<<4)|모드 — 0x21 = 316x208 전체(기본), 0x11 = 640x400, 0x00 = 1280x800
++//   x, y, w, h: 그 해상도 좌표계 안의 창. w*h 는 Pixy 메모리(~73KB) 이하.
++// 반환: 받은 바이트 수(w*h), 실패 시 음수.
++int video_get_frame (int type, int x, int y, int w, int h, char *  buf, size_t  len)
++{
++  int32_t  res, response, fourcc, length;
++  uint8_t  renderflags;
++  uint16_t width, height;
++  uint8_t *frame;
++
++  if (w <= 0 || h <= 0 || len < (size_t) (w * h))
++    return -1;
++  res = pixy_instance.m_link.callChirp ("cam_getFrame",
++      UINT8(type), UINT16(x), UINT16(y), UINT16(w), UINT16(h), END_OUT_ARGS,
++      &response, &fourcc, &renderflags, &width, &height, &length, &frame, END_IN_ARGS);
++  if (res < 0)
++    return res;
++  if (response < 0)
++    return response;
++  if (width != w || height != h)
++    return -2;
++  memcpy (buf, frame, (size_t) (w * h));
++  return w * h;
++}
