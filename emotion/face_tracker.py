@@ -1,13 +1,14 @@
 """
 얼굴 트래킹 — Pixy2 팬틸트 모터로 어르신 얼굴을 화면 가운데에 둔다.
 
-  Pi 카메라 ──▶ YuNet 얼굴 검출 ──▶ 얼굴 중심 오차 ──▶ PD 제어 ──▶ Pixy2 set_servos
+  카메라 ──▶ YuNet 얼굴 검출 ──▶ 얼굴 중심 오차 ──▶ PD 제어 ──▶ Pixy2 set_servos
      ▲                                                              │
-     └──────────── 같은 틸트 플레이트 위라 모터와 함께 돈다 ◀──────────┘
+     └──────────── 팬틸트 위에 있어서 모터와 함께 돈다 ◀──────────────┘
 
-Pixy2 카메라는 색 덩어리만 알아서 '사람'을 직접 못 잡는다. 그래서 기본값(face)은
-사람을 알아보는 일은 Pi 카메라 + YuNet 이 하고, Pixy2 는 모터를 돌린다.
-TRACK_SOURCE=pixy 로 두면 Pixy2 가 학습한 색(피부색·색 마커)을 따라간다.
+카메라는 CAMERA_SOURCE 대로 Pixy2 센서 영상(기본) 또는 Pi 카메라.
+Pixy2 칩 자체는 색 덩어리만 알아서 '사람'을 직접 못 잡는다. 그래서 기본값(face)은
+영상을 받아 YuNet 이 얼굴을 찾고, Pixy2 는 모터를 돌린다.
+TRACK_SOURCE=pixy 로 두면 Pixy2 가 학습한 색(피부색·색 마커)을 따라간다(Pi 카메라일 때만).
 
 얼굴이 가운데 있으면 감정 샘플(emotion_service.py)도 얼굴이 잘린 채 찍히지 않는다.
 카메라는 EmotionService 가 연 것을 같이 쓴다(디바이스 중복 오픈 금지).
@@ -154,15 +155,23 @@ class FaceTracker:
         self._servo.close()
 
 
+def _is_pixy_camera(camera):
+    return type(camera).__name__ == "PixyCamera"
+
+
 def create_tracker(camera=None):
     """설정대로 트래커를 만든다. 꺼져 있거나 Pixy2 가 없으면 None (대화는 계속)."""
     if not config.TRACK_ENABLED:
         return None
     try:
         from pixy_servo import PixyServo
-        tracker = FaceTracker(PixyServo(), camera=camera, source=config.TRACK_SOURCE)
+        source = config.TRACK_SOURCE
+        if source == "pixy" and _is_pixy_camera(camera):
+            print("⚠️  Pixy2 영상을 카메라로 쓰는 중이라 색 시그니처 불가 → face 로 트래킹")
+            source = "face"
+        tracker = FaceTracker(PixyServo(blocks=source == "pixy"), camera=camera, source=source)
         tracker.start()
-        print(f"🎯 얼굴 트래킹 활성화 (source={config.TRACK_SOURCE})")
+        print(f"🎯 얼굴 트래킹 활성화 (source={source})")
         return tracker
     except Exception as e:
         print(f"⚠️  얼굴 트래킹 비활성화: {e}")
@@ -171,10 +180,10 @@ def create_tracker(camera=None):
 
 # ── 단독 실행: 모터 방향·게인 맞추기용 ─────────────────────
 if __name__ == "__main__":
-    from vision import Camera
-    cam = Camera() if config.TRACK_SOURCE == "face" else None
+    from vision import create_camera
+    cam = create_camera() if config.TRACK_SOURCE == "face" else None
     from pixy_servo import PixyServo
-    trk = FaceTracker(PixyServo(), camera=cam)
+    trk = FaceTracker(PixyServo(blocks=config.TRACK_SOURCE == "pixy"), camera=cam)
     trk.start()
     print("Ctrl+C 로 종료. 얼굴이 화면 밖으로 도망가면 PAN_DIR / TILT_DIR 을 -1 로.")
     try:

@@ -17,7 +17,7 @@ import threading
 import time
 
 import config
-from vision import Camera, EmotionAnalyzer
+from vision import EmotionAnalyzer, create_camera
 
 
 class EmotionService:
@@ -32,7 +32,7 @@ class EmotionService:
     """
 
     def __init__(self, sample_interval=0.7, max_samples=30):
-        self._cam = Camera()
+        self._cam = create_camera()
         self._fer = EmotionAnalyzer()
         self._interval = sample_interval   # 프레임 샘플 간격(초)
         self._max_samples = max_samples    # 안전 상한(아주 긴 발화 대비)
