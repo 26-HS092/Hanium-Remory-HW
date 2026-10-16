@@ -1,3 +1,4 @@
+import signal
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -554,7 +555,15 @@ def send_angles(arduino, pan, tilt):
     return command, reply, success
 
 
+def stop_on_signal(signum, frame):
+    # kill·터미널 닫힘도 Ctrl+C처럼 처리해서 정리(정면 복귀)를 거치게 함
+    raise KeyboardInterrupt
+
+
 def main():
+    signal.signal(signal.SIGTERM, stop_on_signal)
+    signal.signal(signal.SIGHUP, stop_on_signal)
+
     detector = None
     stream = None
 
@@ -938,9 +947,20 @@ def main():
             detector.close()
 
         if arduino is not None:
-            arduino.close()
+            # 꺼질 때는 정면으로 돌려 놓음
+            try:
+                arduino.reset_input_buffer()
+                command, reply, success = send_angles(
+                    arduino, PAN_CENTER, TILT_CENTER
+                )
+                if success:
+                    print(f"정면으로 복귀: {command}")
+                else:
+                    print(f"정면 복귀 응답 이상: {reply!r}")
+            except Exception as error:
+                print(f"정면 복귀 실패: {error}")
 
-        print("서보는 마지막 위치를 유지합니다.")
+            arduino.close()
 
 
 if __name__ == "__main__":
