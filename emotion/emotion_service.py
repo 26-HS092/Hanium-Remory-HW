@@ -12,6 +12,9 @@
   VAD: 발화 끝    ──▶  on_speech_end() → 라벨  # 샘플 종료, FER 다수결, 라벨 반환
 
 카메라는 이 모듈만 엽니다. (마이크는 오디오 담당만 — 디바이스 중복 오픈 금지)
+단, Hailo 얼굴 트래커(yolo26_tracker/tracking_hailo.py)를 쓰면 카메라는 트래커가 열고
+camera= 로 넘겨받는다. 이때는 트래커가 따라가는 사람의 얼굴만 본다
+(화면에 다른 사람이 더 크게 보여도 그 사람 표정은 세지 않음).
 """
 import threading
 import time
@@ -31,8 +34,10 @@ class EmotionService:
       - 원본 프레임을 보관하지 않음(분석 직후 폐기) → 메모리/프라이버시 이점.
     """
 
-    def __init__(self, sample_interval=0.7, max_samples=30):
-        self._cam = create_camera()
+    def __init__(self, sample_interval=0.7, max_samples=30, camera=None):
+        self._cam = camera if camera is not None else create_camera()
+        # 트래커 카메라면 (화면, 따라가는 사람 얼굴 위치)를 같이 준다
+        self._snapshot = getattr(self._cam, "snapshot", None)
         self._fer = EmotionAnalyzer()
         self._interval = sample_interval   # 프레임 샘플 간격(초)
         self._max_samples = max_samples    # 안전 상한(아주 긴 발화 대비)
@@ -56,10 +61,21 @@ class EmotionService:
         self._thread = threading.Thread(target=self._sample_loop, daemon=True)
         self._thread.start()
 
+    def _analyze_once(self):
+        """지금 화면 1장 → (label, conf) 또는 None."""
+        if self._snapshot is None:
+            return self._fer.analyze_frame(self._cam.capture())
+        frame, face = self._snapshot()
+        if face is None:
+            # 따라가는 사람의 얼굴이 안 보임(뒤돌았거나 아무도 없음).
+            # 다른 사람 표정을 대신 세지 않도록 건너뛴다.
+            return None
+        return self._fer.analyze_frame(frame, near=face)
+
     def _sample_loop(self):
         # 발화 동안 간격을 두고 캡처 → 즉시 분석 → 투표 누적.
         while not self._stop.is_set() and self._n < self._max_samples:
-            res = self._fer.analyze_frame(self._cam.capture())   # (label, conf) or None
+            res = self._analyze_once()   # (label, conf) or None
             if res is not None:
                 label, conf = res
                 with self._lock:
@@ -80,7 +96,7 @@ class EmotionService:
 
         # 발화가 너무 짧아 한 장도 못 잡았으면 마지막으로 한 장만 시도.
         if not votes:
-            res = self._fer.analyze_frame(self._cam.capture())
+            res = self._analyze_once()
             if res is not None:
                 votes[res[0]] = res[1]
                 n = 1

@@ -159,8 +159,36 @@ def _is_pixy_camera(camera):
     return type(camera).__name__ == "PixyCamera"
 
 
+def create_hailo_tracker():
+    """Hailo 포즈 모델 + 아두이노 팬틸트 트래커. 못 열면 None.
+
+    카메라는 이 트래커가 연다. 감정 인식에는 tracker.shared_camera 를 넘긴다.
+    """
+    if not config.TRACK_ENABLED or config.TRACK_BACKEND != "hailo":
+        return None
+    try:
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "yolo26_tracker"))
+        from tracking_hailo import HailoFaceTracker
+
+        tracker = HailoFaceTracker(
+            stream_port=config.TRACK_STREAM_PORT or None,
+            save_image=False,
+            verbose=False,
+        )
+        tracker.start()
+        print("🎯 얼굴 트래킹 활성화 (Hailo 포즈 + 아두이노 팬틸트)")
+        if config.TRACK_STREAM_PORT:
+            print(f"🎯 트래킹 화면: http://<파이 IP>:{config.TRACK_STREAM_PORT}")
+        return tracker
+    except Exception as e:
+        print(f"⚠️  Hailo 얼굴 트래킹 실패 → Pixy2 방식으로: {e}")
+        return None
+
+
 def create_tracker(camera=None):
-    """설정대로 트래커를 만든다. 꺼져 있거나 Pixy2 가 없으면 None (대화는 계속)."""
+    """설정대로 Pixy2 트래커를 만든다. 꺼져 있거나 Pixy2 가 없으면 None (대화는 계속)."""
     if not config.TRACK_ENABLED:
         return None
     try:
