@@ -34,6 +34,9 @@ TILT_MAX = 158
 # 카메라 (IMX219 = Pi Camera v2)
 # 640x480 센서 모드는 가운데만 잘라 써서 화각이 24°밖에 안 된다.
 # 전체 화면 모드(1640x1232)를 받아 줄여 써야 원래 화각 62°가 나온다.
+# 감정 인식이 얼굴을 선명하게 자르도록 CAPTURE_SIZE로 찍고,
+# 추적은 FRAME_SIZE로 줄인 화면으로 한다.
+CAPTURE_SIZE = (1280, 960)
 FRAME_SIZE = (640, 480)
 SENSOR_SIZE = (1640, 1232)
 HFOV = 62.2         # 가로 화각 (도)
@@ -327,7 +330,7 @@ def measure_shift(before, after):
     return affine[:, 2], int(inliers.sum())
 
 
-def calibrate(camera, arduino):
+def calibrate(grab, arduino):
     """서보를 살짝 돌려 보고 방향과 서보 1도당 픽셀 수를 잰다.
 
     반환: (pan_dir, tilt_dir, pan_deg_per_px, tilt_deg_per_px)
@@ -341,7 +344,7 @@ def calibrate(camera, arduino):
             raise RuntimeError(f"보정 중 아두이노 응답 이상: {reply!r}")
         time.sleep(0.6)
         for _ in range(3):  # 서보가 멈춘 뒤 프레임을 받도록 버퍼 비우기
-            frame = camera.capture_array()
+            frame = grab()
         return frame
 
     tests = [
@@ -578,42 +581,62 @@ def send_angles(arduino, pan, tilt):
     return command, reply, success
 
 
-def stop_on_signal(signum, frame):
-    # kill·터미널 닫힘도 Ctrl+C처럼 처리해서 정리(정면 복귀)를 거치게 함
-    raise KeyboardInterrupt
+class HailoFaceTracker:
+    """카메라 → 포즈 검출 → 팬틸트 제어를 한 줄로 돌리는 얼굴 추적기.
 
+    단독 실행(main)에서는 그대로 앞에서 돌리고, 메인 앱에서는 start()로
+    백그라운드 스레드에서 돌린다. 감정 인식은 snapshot()으로 최신 화면과
+    지금 따라가는 사람의 얼굴 위치를 받아 간다.
+    """
 
-def main():
-    signal.signal(signal.SIGTERM, stop_on_signal)
-    signal.signal(signal.SIGHUP, stop_on_signal)
+    def __init__(
+        self,
+        stream_port=STREAM_PORT,
+        save_image=True,
+        verbose=True,
+        auto_calibrate=None,
+    ):
+        self.stream_port = stream_port      # None이면 브라우저 화면 끔
+        self.save_image = save_image        # latest.jpg 저장 여부
+        self.verbose = verbose              # 프레임마다 상태 출력 여부
+        self.auto_calibrate = auto_calibrate
 
-    detector = None
-    stream = None
+        self.detector = None
+        self.stream = None
+        self.camera = None
+        self.camera_started = False
+        self.arduino = None
 
-    camera = None
-    camera_started = False
-    arduino = None
+        self.pan = float(PAN_CENTER)
+        self.tilt = float(TILT_CENTER)
+        self.pan_dir, self.tilt_dir = PAN_DIRECTION, TILT_DIRECTION
+        self.pan_deg_per_px, self.tilt_deg_per_px = DEG_PER_PX_X, DEG_PER_PX_Y
 
-    pan = float(PAN_CENTER)
-    tilt = float(TILT_CENTER)
+        self.smooth_x = None
+        self.smooth_y = None
 
-    smooth_x = None
-    smooth_y = None
+        # "scan": 좌우로 돌며 찾기, "track": 찾은 사람 추적
+        self.mode = "scan"
+        self.scan_direction = 1
+        # 최근 얼굴이 있던 서보 각도 기록 (시각, pan, tilt): 놓쳤을 때 갈 곳 예측용
+        self.face_history = deque()
+        self.lost_goal = None      # 놓친 뒤 돌아볼 (pan, tilt)
+        self.lock = TargetLock()
+        self.seen_frames = 0
+        self.last_seen = 0.0
 
-    # "scan": 좌우로 돌며 찾기, "track": 찾은 사람 추적
-    mode = "scan"
-    scan_direction = 1
-    # 최근 얼굴이 있던 서보 각도 기록 (시각, pan, tilt): 놓쳤을 때 갈 곳 예측용
-    face_history = deque()
-    lost_goal = None      # 놓친 뒤 돌아볼 (pan, tilt)
-    lock = TargetLock()
-    seen_frames = 0
-    last_seen = 0.0
+        self.last_image_save = 0.0
+        self.last_loop = None
 
-    last_image_save = 0.0
+        # 다른 스레드(감정 인식)에 넘겨 줄 최신 화면과 대상 얼굴 위치
+        self._snapshot_lock = threading.Lock()
+        self._snapshot = (None, None)
+        self._stop = threading.Event()
+        self._thread = None
 
-    try:
-        arduino = serial.Serial(
+    # ── 장치 열기 ─────────────────────────────────────────────
+    def open(self):
+        self.arduino = serial.Serial(
             SERIAL_PORT,
             BAUD_RATE,
             timeout=1,
@@ -622,11 +645,11 @@ def main():
 
         # 아두이노 재시작 대기
         time.sleep(2)
-        arduino.reset_input_buffer()
+        self.arduino.reset_input_buffer()
 
         # 시작 시 중앙 위치 명령
         command, reply, success = send_angles(
-            arduino, pan, tilt
+            self.arduino, self.pan, self.tilt
         )
 
         if not success:
@@ -637,223 +660,255 @@ def main():
         print(f"중앙 위치 설정: {command}", flush=True)
         time.sleep(1)
 
-        detector = HailoPoseDetector(MODEL_PATH)
-        stream = FrameStream(STREAM_PORT)
+        self.detector = HailoPoseDetector(MODEL_PATH)
+        if self.stream_port:
+            self.stream = FrameStream(self.stream_port)
 
-        camera = Picamera2()
-        camera.configure(
-            camera.create_video_configuration(
+        self.camera = Picamera2()
+        self.camera.configure(
+            self.camera.create_video_configuration(
                 main={
                     "format": "RGB888",
-                    "size": FRAME_SIZE,
+                    "size": CAPTURE_SIZE,
                 },
                 sensor={"output_size": SENSOR_SIZE},
                 buffer_count=2,
             )
         )
 
-        camera.start()
-        camera_started = True
+        self.camera.start()
+        self.camera_started = True
         time.sleep(1)
 
-        pan_dir, tilt_dir = PAN_DIRECTION, TILT_DIRECTION
-        pan_deg_per_px, tilt_deg_per_px = DEG_PER_PX_X, DEG_PER_PX_Y
-        if AUTO_CALIBRATE:
-            pan_dir, tilt_dir, pan_deg_per_px, tilt_deg_per_px = calibrate(
-                camera, arduino
-            )
+        auto = AUTO_CALIBRATE if self.auto_calibrate is None else self.auto_calibrate
+        if auto:
+            (
+                self.pan_dir,
+                self.tilt_dir,
+                self.pan_deg_per_px,
+                self.tilt_deg_per_px,
+            ) = calibrate(lambda: self._grab()[1], self.arduino)
 
         print("사람 추적 시작 (Hailo HAT)")
         print("대상: 가장 크게 보이는 사람 한 명의 얼굴 (고르면 고정)")
         print(f"탐색 범위: PAN {SCAN_MIN}~{SCAN_MAX}")
-        print(f"결과 이미지: {RESULT_PATH}")
-        print(f"카메라 화면: http://<라즈베리파이 IP>:{STREAM_PORT}")
+        if self.save_image:
+            print(f"결과 이미지: {RESULT_PATH}")
+        if self.stream:
+            print(f"카메라 화면: http://<라즈베리파이 IP>:{self.stream_port}")
         print("종료: Ctrl+C", flush=True)
 
-        last_loop = time.monotonic()
+        self.last_loop = time.monotonic()
 
-        while True:
-            started = time.perf_counter()
+    def _grab(self):
+        """(감정용 원본 화면, 추적용으로 줄인 화면)"""
+        full = self.camera.capture_array()
+        height, width = full.shape[:2]
+        if (width, height) == FRAME_SIZE:
+            return full, full
+        small = cv2.resize(full, FRAME_SIZE, interpolation=cv2.INTER_AREA)
+        return full, small
 
-            now = time.monotonic()
-            dt = now - last_loop
-            last_loop = now
+    # ── 감정 인식 등 다른 스레드용 ─────────────────────────────
+    def snapshot(self):
+        """(최신 원본 화면, 따라가는 사람 얼굴의 원본 좌표 (x, y) 또는 None)"""
+        with self._snapshot_lock:
+            return self._snapshot
 
-            frame = camera.capture_array()
+    # ── 한 프레임 처리 ────────────────────────────────────────
+    def step(self):
+        started = time.perf_counter()
 
-            boxes, scores, keypoints = detector.detect(frame)
+        now = time.monotonic()
+        dt = now - self.last_loop
+        self.last_loop = now
 
-            height, width = frame.shape[:2]
-            screen_x = width // 2
-            screen_y = height // 2
+        full, frame = self._grab()
 
-            target_box = None
-            target_point = None
-            target_face = None
+        boxes, scores, keypoints = self.detector.detect(frame)
 
-            if len(boxes) > 0:
-                seen_frames += 1
-                last_seen = now
-            else:
-                seen_frames = 0
+        height, width = frame.shape[:2]
+        screen_x = width // 2
+        screen_y = height // 2
 
-            if mode == "scan" and seen_frames >= CONFIRM_FRAMES:
-                mode = "track"
-                smooth_x = None
-                smooth_y = None
-                lock.reset()
-                print("사람 발견: 추적 시작", flush=True)
+        target_box = None
+        target_point = None
+        target_face = None
+        face_full = None
 
-            elif mode == "track" and now - last_seen > LOST_TIMEOUT:
-                mode = "scan"
-                # 사라진 쪽으로 계속 이어서 찾아봄
-                if lost_goal is not None and face_history:
-                    moved = lost_goal[0] - face_history[0][1]
-                    if abs(moved) >= 1:
-                        scan_direction = 1 if moved > 0 else -1
-                face_history.clear()
-                lost_goal = None
-                print("사람 놓침: 다시 탐색", flush=True)
+        if len(boxes) > 0:
+            self.seen_frames += 1
+            self.last_seen = now
+        else:
+            self.seen_frames = 0
 
-            target_index = None
-            if mode == "track":
-                target_index = lock.update(frame, boxes, now)
+        if self.mode == "scan" and self.seen_frames >= CONFIRM_FRAMES:
+            self.mode = "track"
+            self.smooth_x = None
+            self.smooth_y = None
+            self.lock.reset()
+            print("사람 발견: 추적 시작", flush=True)
 
-            if target_index is not None:
-                x1, y1, x2, y2 = map(
-                    int, boxes[target_index]
-                )
+        elif self.mode == "track" and now - self.last_seen > LOST_TIMEOUT:
+            self.mode = "scan"
+            # 사라진 쪽으로 계속 이어서 찾아봄
+            if self.lost_goal is not None and self.face_history:
+                moved = self.lost_goal[0] - self.face_history[0][1]
+                if abs(moved) >= 1:
+                    self.scan_direction = 1 if moved > 0 else -1
+            self.face_history.clear()
+            self.lost_goal = None
+            print("사람 놓침: 다시 탐색", flush=True)
 
-                (target_x, target_y), face_found = face_point(
-                    boxes[target_index], keypoints[target_index]
-                )
+        target_index = None
+        if self.mode == "track":
+            target_index = self.lock.update(frame, boxes, now)
 
-                if face_found:
-                    target_face = keypoints[target_index][
-                        FACE_KEYPOINTS + EAR_KEYPOINTS
-                    ]
-                else:
-                    # 얼굴이 안 보이는데 박스가 화면 끝에 걸려 잘렸으면
-                    # 머리가 그 바깥에 있으므로 잘린 쪽 끝을 조준해서 더 빨리 돌아감
-                    at_left = x1 <= EDGE_MARGIN
-                    at_right = x2 >= width - 1 - EDGE_MARGIN
-                    if at_left and not at_right:
-                        target_x = x1
-                    elif at_right and not at_left:
-                        target_x = x2
-                    if y1 <= EDGE_MARGIN:
-                        target_y = y1
-
-                # 얼굴이 있는 곳을 서보 각도로 기록 (이 프레임을 찍을 때의 각도 기준)
-                face_history.append((
-                    now,
-                    pan + pan_dir * (target_x - screen_x) * pan_deg_per_px,
-                    tilt + tilt_dir * (target_y - screen_y) * tilt_deg_per_px,
-                ))
-                while now - face_history[0][0] > HISTORY_TIME:
-                    face_history.popleft()
-                lost_goal = None
-
-                # 탐지 중심 좌표의 흔들림 완화
-                if smooth_x is None:
-                    smooth_x = float(target_x)
-                    smooth_y = float(target_y)
-                else:
-                    smooth_x += SMOOTHING * (
-                        target_x - smooth_x
-                    )
-                    smooth_y += SMOOTHING * (
-                        target_y - smooth_y
-                    )
-
-                error_x = smooth_x - screen_x
-                error_y = smooth_y - screen_y
-
-                wanted_pan = pan + pan_dir * correction(
-                    error_x, pan_deg_per_px, dt
-                )
-                wanted_tilt = tilt + tilt_dir * correction(
-                    error_y, tilt_deg_per_px, dt
-                )
-                pan = clamp(wanted_pan, PAN_MIN, PAN_MAX)
-                tilt = clamp(wanted_tilt, TILT_MIN, TILT_MAX)
-
-                # 더 돌아야 하는데 안전 범위 끝에 막힌 경우 (사람이 범위 밖)
-                limits = []
-                if wanted_pan != pan:
-                    limits.append(f"PAN {round(pan)}")
-                if wanted_tilt != tilt:
-                    limits.append(f"TILT {round(tilt)}")
-
-                target_box = (x1, y1, x2, y2)
-                target_point = (
-                    round(smooth_x),
-                    round(smooth_y),
-                )
-
-                target_status = (
-                    f"{'얼굴' if face_found else '얼굴 추정'} "
-                    f"오차 X={error_x:.0f}, "
-                    f"Y={error_y:.0f}"
-                )
-                if limits:
-                    target_status += (
-                        f" | 각도 한계({', '.join(limits)}): "
-                        "사람이 회전 범위 밖"
-                    )
-
-            elif mode == "track":
-                # 잠깐 안 보이면 마지막 각도 유지
-                # (다른 사람만 보여도 LOCK_TIMEOUT 동안은 넘어가지 않음)
-                smooth_x = None
-                smooth_y = None
-
-                if lost_goal is None and face_history:
-                    # 마지막 위치 + 움직이던 방향으로 지금쯤 있을 곳
-                    lost_goal = predict_lost_goal(face_history)
-                    print(
-                        f"대상 놓침: 사라진 쪽 PAN {lost_goal[0]:.0f}, "
-                        f"TILT {lost_goal[1]:.0f}으로 돌아봄",
-                        flush=True,
-                    )
-
-                if lost_goal is not None:
-                    pan = step_toward(pan, lost_goal[0], CHASE_SPEED * dt)
-                    tilt = step_toward(tilt, lost_goal[1], CHASE_SPEED * dt)
-                    target_status = (
-                        f"대상 놓침: PAN {lost_goal[0]:.0f}, "
-                        f"TILT {lost_goal[1]:.0f} 쪽을 보는 중"
-                    )
-                else:
-                    target_status = "대상 안 보임: 각도 유지"
-
-            else:
-                # 좌우 끝까지 돌고 방향 전환, 틸트는 중앙
-                pan += scan_direction * SCAN_SPEED * dt
-
-                if pan >= SCAN_MAX:
-                    pan = SCAN_MAX
-                    scan_direction = -1
-                elif pan <= SCAN_MIN:
-                    pan = SCAN_MIN
-                    scan_direction = 1
-
-                tilt = float(TILT_CENTER)
-                target_status = "탐색 중"
-
-            # 계산한 각도 전송
-            command, reply, success = send_angles(
-                arduino, pan, tilt
+        if target_index is not None:
+            x1, y1, x2, y2 = map(
+                int, boxes[target_index]
             )
 
-            if not success:
-                # 통신이 불확실한 상태에서는 추적 중단
-                raise RuntimeError(
-                    f"아두이노 응답 이상: {reply!r}"
+            (target_x, target_y), face_found = face_point(
+                boxes[target_index], keypoints[target_index]
+            )
+
+            if face_found:
+                target_face = keypoints[target_index][
+                    FACE_KEYPOINTS + EAR_KEYPOINTS
+                ]
+                # 감정 인식에 넘길 얼굴 위치 (원본 화면 좌표)
+                full_h, full_w = full.shape[:2]
+                face_full = (
+                    target_x * full_w / width,
+                    target_y * full_h / height,
+                )
+            else:
+                # 얼굴이 안 보이는데 박스가 화면 끝에 걸려 잘렸으면
+                # 머리가 그 바깥에 있으므로 잘린 쪽 끝을 조준해서 더 빨리 돌아감
+                at_left = x1 <= EDGE_MARGIN
+                at_right = x2 >= width - 1 - EDGE_MARGIN
+                if at_left and not at_right:
+                    target_x = x1
+                elif at_right and not at_left:
+                    target_x = x2
+                if y1 <= EDGE_MARGIN:
+                    target_y = y1
+
+            # 얼굴이 있는 곳을 서보 각도로 기록 (이 프레임을 찍을 때의 각도 기준)
+            self.face_history.append((
+                now,
+                self.pan + self.pan_dir * (target_x - screen_x) * self.pan_deg_per_px,
+                self.tilt + self.tilt_dir * (target_y - screen_y) * self.tilt_deg_per_px,
+            ))
+            while now - self.face_history[0][0] > HISTORY_TIME:
+                self.face_history.popleft()
+            self.lost_goal = None
+
+            # 탐지 중심 좌표의 흔들림 완화
+            if self.smooth_x is None:
+                self.smooth_x = float(target_x)
+                self.smooth_y = float(target_y)
+            else:
+                self.smooth_x += SMOOTHING * (
+                    target_x - self.smooth_x
+                )
+                self.smooth_y += SMOOTHING * (
+                    target_y - self.smooth_y
                 )
 
-            elapsed = time.perf_counter() - started
+            error_x = self.smooth_x - screen_x
+            error_y = self.smooth_y - screen_y
 
+            wanted_pan = self.pan + self.pan_dir * correction(
+                error_x, self.pan_deg_per_px, dt
+            )
+            wanted_tilt = self.tilt + self.tilt_dir * correction(
+                error_y, self.tilt_deg_per_px, dt
+            )
+            self.pan = clamp(wanted_pan, PAN_MIN, PAN_MAX)
+            self.tilt = clamp(wanted_tilt, TILT_MIN, TILT_MAX)
+
+            # 더 돌아야 하는데 안전 범위 끝에 막힌 경우 (사람이 범위 밖)
+            limits = []
+            if wanted_pan != self.pan:
+                limits.append(f"PAN {round(self.pan)}")
+            if wanted_tilt != self.tilt:
+                limits.append(f"TILT {round(self.tilt)}")
+
+            target_box = (x1, y1, x2, y2)
+            target_point = (
+                round(self.smooth_x),
+                round(self.smooth_y),
+            )
+
+            target_status = (
+                f"{'얼굴' if face_found else '얼굴 추정'} "
+                f"오차 X={error_x:.0f}, "
+                f"Y={error_y:.0f}"
+            )
+            if limits:
+                target_status += (
+                    f" | 각도 한계({', '.join(limits)}): "
+                    "사람이 회전 범위 밖"
+                )
+
+        elif self.mode == "track":
+            # 잠깐 안 보이면 마지막 각도 유지
+            # (다른 사람만 보여도 LOCK_TIMEOUT 동안은 넘어가지 않음)
+            self.smooth_x = None
+            self.smooth_y = None
+
+            if self.lost_goal is None and self.face_history:
+                # 마지막 위치 + 움직이던 방향으로 지금쯤 있을 곳
+                self.lost_goal = predict_lost_goal(self.face_history)
+                print(
+                    f"대상 놓침: 사라진 쪽 PAN {self.lost_goal[0]:.0f}, "
+                    f"TILT {self.lost_goal[1]:.0f}으로 돌아봄",
+                    flush=True,
+                )
+
+            if self.lost_goal is not None:
+                self.pan = step_toward(self.pan, self.lost_goal[0], CHASE_SPEED * dt)
+                self.tilt = step_toward(self.tilt, self.lost_goal[1], CHASE_SPEED * dt)
+                target_status = (
+                    f"대상 놓침: PAN {self.lost_goal[0]:.0f}, "
+                    f"TILT {self.lost_goal[1]:.0f} 쪽을 보는 중"
+                )
+            else:
+                target_status = "대상 안 보임: 각도 유지"
+
+        else:
+            # 좌우 끝까지 돌고 방향 전환, 틸트는 중앙
+            self.pan += self.scan_direction * SCAN_SPEED * dt
+
+            if self.pan >= SCAN_MAX:
+                self.pan = SCAN_MAX
+                self.scan_direction = -1
+            elif self.pan <= SCAN_MIN:
+                self.pan = SCAN_MIN
+                self.scan_direction = 1
+
+            self.tilt = float(TILT_CENTER)
+            target_status = "탐색 중"
+
+        with self._snapshot_lock:
+            self._snapshot = (full, face_full)
+
+        # 계산한 각도 전송
+        command, reply, success = send_angles(
+            self.arduino, self.pan, self.tilt
+        )
+
+        if not success:
+            # 통신이 불확실한 상태에서는 추적 중단
+            raise RuntimeError(
+                f"아두이노 응답 이상: {reply!r}"
+            )
+
+        elapsed = time.perf_counter() - started
+
+        if self.verbose:
             print(
                 f"{target_status} | "
                 f"전송={command} | 수신 성공 | "
@@ -861,138 +916,188 @@ def main():
                 flush=True,
             )
 
-            # 화면 그리기 (스트리밍용, 매 프레임)
-            image = frame.copy()
+        # 보는 사람이 없으면 화면을 그리지 않음
+        save_now = (
+            self.save_image
+            and now - self.last_image_save >= IMAGE_SAVE_INTERVAL
+        )
+        if self.stream is None and not save_now:
+            return
 
-            for box, score in zip(boxes, scores):
-                bx1, by1, bx2, by2 = map(int, box)
-                cv2.rectangle(
-                    image, (bx1, by1), (bx2, by2), (255, 0, 0), 2
-                )
-                cv2.putText(
-                    image,
-                    f"person {score:.2f}",
-                    (bx1, max(15, by1 - 5)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (255, 0, 0),
-                    1,
-                )
+        # 화면 그리기 (스트리밍용, 매 프레임)
+        image = frame.copy()
 
-            cv2.drawMarker(
-                image,
-                (screen_x, screen_y),
-                (255, 255, 255),
-                cv2.MARKER_CROSS,
-                20,
-                2,
-            )
-
+        for box, score in zip(boxes, scores):
+            bx1, by1, bx2, by2 = map(int, box)
             cv2.rectangle(
+                image, (bx1, by1), (bx2, by2), (255, 0, 0), 2
+            )
+            cv2.putText(
                 image,
-                (
-                    screen_x - DEAD_ZONE,
-                    screen_y - DEAD_ZONE,
-                ),
-                (
-                    screen_x + DEAD_ZONE,
-                    screen_y + DEAD_ZONE,
-                ),
-                (255, 255, 255),
+                f"person {score:.2f}",
+                (bx1, max(15, by1 - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 0, 0),
                 1,
             )
 
-            if target_box is not None:
-                x1, y1, x2, y2 = target_box
+        cv2.drawMarker(
+            image,
+            (screen_x, screen_y),
+            (255, 255, 255),
+            cv2.MARKER_CROSS,
+            20,
+            2,
+        )
 
-                cv2.rectangle(
-                    image,
-                    (x1, y1),
-                    (x2, y2),
-                    (0, 255, 255),
-                    3,
-                )
+        cv2.rectangle(
+            image,
+            (
+                screen_x - DEAD_ZONE,
+                screen_y - DEAD_ZONE,
+            ),
+            (
+                screen_x + DEAD_ZONE,
+                screen_y + DEAD_ZONE,
+            ),
+            (255, 255, 255),
+            1,
+        )
 
-                cv2.putText(
-                    image,
-                    "TARGET",
-                    (x1, max(20, y1 - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 255),
-                    2,
-                )
+        if target_box is not None:
+            x1, y1, x2, y2 = target_box
 
-                if target_face is not None:
-                    for fx, fy, conf in target_face:
-                        if conf >= KEYPOINT_CONF:
-                            cv2.circle(
-                                image,
-                                (round(fx), round(fy)),
-                                3,
-                                (0, 255, 0),
-                                -1,
-                            )
-
-                cv2.circle(
-                    image,
-                    target_point,
-                    6,
-                    (0, 0, 255),
-                    -1,
-                )
-
-                cv2.line(
-                    image,
-                    (screen_x, screen_y),
-                    target_point,
-                    (0, 255, 255),
-                    2,
-                )
+            cv2.rectangle(
+                image,
+                (x1, y1),
+                (x2, y2),
+                (0, 255, 255),
+                3,
+            )
 
             cv2.putText(
                 image,
-                f"{mode.upper()}  PAN: {round(pan)}  TILT: {round(tilt)}",
-                (10, 30),
+                "TARGET",
+                (x1, max(20, y1 - 10)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
-                (0, 255, 0),
+                (0, 255, 255),
                 2,
             )
 
-            stream.update(image)
+            if target_face is not None:
+                for fx, fy, conf in target_face:
+                    if conf >= KEYPOINT_CONF:
+                        cv2.circle(
+                            image,
+                            (round(fx), round(fy)),
+                            3,
+                            (0, 255, 0),
+                            -1,
+                        )
 
-            # 결과 이미지 저장은 1초마다 수행
-            if now - last_image_save >= IMAGE_SAVE_INTERVAL:
-                if not cv2.imwrite(str(TEMP_PATH), image):
-                    raise RuntimeError("결과 이미지 저장 실패")
+            cv2.circle(
+                image,
+                target_point,
+                6,
+                (0, 0, 255),
+                -1,
+            )
 
-                TEMP_PATH.replace(RESULT_PATH)
-                last_image_save = now
+            cv2.line(
+                image,
+                (screen_x, screen_y),
+                target_point,
+                (0, 255, 255),
+                2,
+            )
 
+        cv2.putText(
+            image,
+            f"{self.mode.upper()}  PAN: {round(self.pan)}  TILT: {round(self.tilt)}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+        )
+
+        if self.stream is not None:
+            self.stream.update(image)
+
+        # 결과 이미지 저장은 1초마다 수행
+        if save_now:
+            if not cv2.imwrite(str(TEMP_PATH), image):
+                raise RuntimeError("결과 이미지 저장 실패")
+
+            TEMP_PATH.replace(RESULT_PATH)
+            self.last_image_save = now
+
+    # ── 앞에서 계속 돌리기 (단독 실행) ─────────────────────────
+    def run(self):
+        while not self._stop.is_set():
+            self.step()
             # capture_array()가 다음 프레임까지 기다리므로 따로 쉬지 않음
 
-    except KeyboardInterrupt:
-        print("\n추적 종료")
+    # ── 백그라운드로 돌리기 (메인 앱) ──────────────────────────
+    def start(self):
+        """장치를 열고 추적 스레드를 시작한다. 장치를 못 열면 예외."""
+        try:
+            self.open()
+        except Exception:
+            self.close()
+            raise
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
 
-    finally:
-        if camera is not None:
-            if camera_started:
-                camera.stop()
-            camera.close()
+    def _loop(self):
+        errors = 0
+        while not self._stop.is_set():
+            try:
+                self.step()
+                errors = 0
+            except Exception as error:
+                # USB 순간 끊김 등 — 추적만 잠깐 쉬고 대화는 계속
+                errors += 1
+                if errors in (1, 50):
+                    print(f"⚠️  얼굴 추적 오류: {error}", flush=True)
+                self._stop.wait(0.5)
 
-        if stream is not None:
-            stream.close()
+    @property
+    def shared_camera(self):
+        """감정 인식이 쓰는 카메라 자리에 끼울 수 있는 객체."""
+        return SharedCamera(self)
 
-        if detector is not None:
-            detector.close()
+    # ── 정리 ────────────────────────────────────────────────
+    def close(self):
+        self._stop.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=3.0)
+            self._thread = None
 
-        if arduino is not None:
+        if self.camera is not None:
+            if self.camera_started:
+                self.camera.stop()
+                self.camera_started = False
+            self.camera.close()
+            self.camera = None
+
+        if self.stream is not None:
+            self.stream.close()
+            self.stream = None
+
+        if self.detector is not None:
+            self.detector.close()
+            self.detector = None
+
+        if self.arduino is not None:
             # 꺼질 때는 정면으로 돌려 놓음
             try:
-                arduino.reset_input_buffer()
+                self.arduino.reset_input_buffer()
                 command, reply, success = send_angles(
-                    arduino, PAN_CENTER, TILT_CENTER
+                    self.arduino, PAN_CENTER, TILT_CENTER
                 )
                 if success:
                     print(f"정면으로 복귀: {command}")
@@ -1001,7 +1106,55 @@ def main():
             except Exception as error:
                 print(f"정면 복귀 실패: {error}")
 
-            arduino.close()
+            self.arduino.close()
+            self.arduino = None
+
+
+class SharedCamera:
+    """추적기가 찍은 화면을 감정 인식이 같이 쓰게 하는 카메라 흉내.
+
+    카메라는 추적기가 열고 닫는다. 그래서 close()는 아무것도 안 한다.
+    """
+
+    def __init__(self, tracker, timeout=2.0):
+        self._tracker = tracker
+        self._timeout = timeout
+
+    def snapshot(self):
+        """(원본 화면, 따라가는 사람 얼굴 위치 또는 None). 첫 화면이 올 때까지 잠깐 기다림."""
+        deadline = time.monotonic() + self._timeout
+        while True:
+            frame, face = self._tracker.snapshot()
+            if frame is not None or time.monotonic() > deadline:
+                return frame, face
+            time.sleep(0.05)
+
+    def capture(self):
+        return self.snapshot()[0]
+
+    def close(self):
+        pass
+
+
+def stop_on_signal(signum, frame):
+    # kill·터미널 닫힘도 Ctrl+C처럼 처리해서 정리(정면 복귀)를 거치게 함
+    raise KeyboardInterrupt
+
+
+def main():
+    signal.signal(signal.SIGTERM, stop_on_signal)
+    signal.signal(signal.SIGHUP, stop_on_signal)
+
+    tracker = HailoFaceTracker()
+    try:
+        tracker.open()
+        tracker.run()
+
+    except KeyboardInterrupt:
+        print("\n추적 종료")
+
+    finally:
+        tracker.close()
 
 
 if __name__ == "__main__":
