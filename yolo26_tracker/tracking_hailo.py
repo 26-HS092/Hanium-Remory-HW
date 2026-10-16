@@ -11,8 +11,8 @@ from picamera2 import Picamera2
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
-# Hailo-10H용 COCO 모델 (NMS 포함, 사람 = 클래스 0)
-MODEL_PATH = Path("/usr/share/hailo-models/yolov8m_h10.hef")
+# Hailo-10H용 포즈 모델: 사람 박스 + 관절 17개(코·눈·귀 포함) 위치
+MODEL_PATH = Path("/usr/share/hailo-models/yolov8m_pose_h10.hef")
 RESULT_PATH = PROJECT_DIR / "latest.jpg"
 TEMP_PATH = PROJECT_DIR / "latest_tmp.jpg"
 
@@ -40,11 +40,11 @@ DEG_PER_PX_X = HFOV / FRAME_SIZE[0]
 DEG_PER_PX_Y = VFOV / FRAME_SIZE[1]
 
 # 추적 설정
-DEAD_ZONE = 25       # 중앙 부근(픽셀)에서는 움직이지 않음
+DEAD_ZONE = 15       # 중앙 부근(픽셀)에서는 움직이지 않음
 KP = 0.4             # 한 프레임에 남은 각도 오차의 몇 %를 줄일지
 MAX_SPEED = 90.0     # 최대 회전 속도 (도/초)
 SMOOTHING = 0.6      # 작을수록 부드럽지만 반응이 느림
-AIM_Y_RATIO = 0.3    # 박스 위에서 이 비율 지점(가슴~얼굴)을 화면 중앙에 맞춤
+HEAD_Y_RATIO = 0.1   # 얼굴·어깨가 안 보일 때 박스 위에서 이 비율 지점을 머리로 봄
 
 # 방향이 반대라면 해당 값을 -1로 변경
 PAN_DIRECTION = 1
@@ -71,7 +71,12 @@ MIN_HIST_SIM = 0.3    # 여러 명일 때 옷 색이 이보다 다르면 대상�
 
 # 탐지 설정
 CONF_THRESHOLD = 0.4
-PERSON_CLASS = 0
+NMS_IOU = 0.6
+REG_MAX = 15            # 박스 회귀 분포 길이 (YOLOv8)
+KEYPOINT_CONF = 0.5     # 관절이 이 확률 이상이면 보인다고 봄
+FACE_KEYPOINTS = [0, 1, 2]        # 코, 왼눈, 오른눈
+EAR_KEYPOINTS = [3, 4]            # 왼귀, 오른귀 (옆모습일 때만 사용)
+SHOULDER_KEYPOINTS = [5, 6]
 
 # 브라우저로 카메라 화면 보기: http://<라즈베리파이 IP>:8000
 STREAM_PORT = 8000
@@ -85,8 +90,8 @@ def clamp(value, minimum, maximum):
     return max(minimum, min(maximum, value))
 
 
-class HailoPersonDetector:
-    """HAT(Hailo NPU)에서 사람 박스를 찾는다."""
+class HailoPoseDetector:
+    """HAT(Hailo NPU)에서 사람 박스와 관절 위치를 찾는다."""
 
     def __init__(self, hef_path):
         params = VDevice.create_params()
@@ -97,23 +102,31 @@ class HailoPersonDetector:
         self.vdevice = VDevice(params)
         self.model = self.vdevice.create_infer_model(str(hef_path))
         self.model.input().set_format_type(FormatType.UINT8)
-        self.model.output().set_format_type(FormatType.FLOAT32)
+        for output in self.model.outputs:
+            output.set_format_type(FormatType.FLOAT32)
 
         self.input_h, self.input_w = self.model.input().shape[:2]
-        self.output_name = self.model.output().name
+
+        # 출력은 격자 크기(80/40/20)마다 박스·점수·관절 3개씩
+        self.heads = {}
+        for output in self.model.outputs:
+            grid_h, grid_w, channels = output.shape
+            kind = {(REG_MAX + 1) * 4: "box", 1: "score", 51: "kpt"}[channels]
+            self.heads.setdefault((grid_h, grid_w), {})[kind] = output.name
 
         self.config_ctx = self.model.configure()
         self.configured = self.config_ctx.__enter__()
 
-        self.output_buffer = np.empty(
-            self.model.output().shape, dtype=np.float32
-        )
+        self.output_buffers = {
+            output.name: np.empty(output.shape, dtype=np.float32)
+            for output in self.model.outputs
+        }
         self.bindings = self.configured.create_bindings(
-            output_buffers={self.output_name: self.output_buffer}
+            output_buffers=self.output_buffers
         )
 
     def detect(self, frame_bgr):
-        """사람 박스 목록을 원본 좌표 (x1, y1, x2, y2) 배열로 반환."""
+        """원본 좌표의 사람 박스 (N, 4), 점수 (N,), 관절 (N, 17, 3=x,y,확률)."""
         height, width = frame_bgr.shape[:2]
 
         # 비율 유지 리사이즈 + 여백 채우기 (letterbox)
@@ -132,23 +145,67 @@ class HailoPersonDetector:
         self.bindings.input().set_buffer(np.ascontiguousarray(canvas))
         self.configured.run([self.bindings], 10000)
 
-        # 클래스별 리스트, 각 행 = [ymin, xmin, ymax, xmax, score] (0~1)
-        persons = self.bindings.output().get_buffer()[PERSON_CLASS]
-        if len(persons) == 0:
-            return np.empty((0, 4)), np.empty(0)
+        all_boxes, all_scores, all_kpts = [], [], []
 
-        persons = persons[persons[:, 4] >= CONF_THRESHOLD]
+        for (grid_h, grid_w), names in self.heads.items():
+            stride = self.input_h // grid_h
+            scores = self.output_buffers[names["score"]].reshape(-1)
+            keep = np.flatnonzero(scores >= CONF_THRESHOLD)
+            if keep.size == 0:
+                continue
 
-        x1 = (persons[:, 1] * self.input_w - pad_x) / scale
-        y1 = (persons[:, 0] * self.input_h - pad_y) / scale
-        x2 = (persons[:, 3] * self.input_w - pad_x) / scale
-        y2 = (persons[:, 2] * self.input_h - pad_y) / scale
+            grid_y, grid_x = np.divmod(keep, grid_w)
 
-        boxes = np.stack([x1, y1, x2, y2], axis=1)
-        boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, width - 1)
-        boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, height - 1)
+            # 박스: 칸 중심에서 좌/상/우/하 거리의 분포 → 기댓값
+            dist = self.output_buffers[names["box"]].reshape(
+                -1, 4, REG_MAX + 1
+            )[keep]
+            dist = np.exp(dist - dist.max(axis=-1, keepdims=True))
+            dist /= dist.sum(axis=-1, keepdims=True)
+            dist = (dist @ np.arange(REG_MAX + 1)) * stride
 
-        return boxes, persons[:, 4]
+            center_x = (grid_x + 0.5) * stride
+            center_y = (grid_y + 0.5) * stride
+            all_boxes.append(np.stack([
+                center_x - dist[:, 0],
+                center_y - dist[:, 1],
+                center_x + dist[:, 2],
+                center_y + dist[:, 3],
+            ], axis=1))
+            all_scores.append(scores[keep])
+
+            kpts = self.output_buffers[names["kpt"]].reshape(
+                -1, 17, 3
+            )[keep].copy()
+            kpts[..., 0] = (kpts[..., 0] * 2 + grid_x[:, None]) * stride
+            kpts[..., 1] = (kpts[..., 1] * 2 + grid_y[:, None]) * stride
+            kpts[..., 2] = 1 / (1 + np.exp(-kpts[..., 2]))
+            all_kpts.append(kpts)
+
+        if not all_boxes:
+            return np.empty((0, 4)), np.empty(0), np.empty((0, 17, 3))
+
+        boxes = np.concatenate(all_boxes)
+        scores = np.concatenate(all_scores)
+        kpts = np.concatenate(all_kpts)
+
+        # 겹치는 박스 정리 (NMS)
+        keep = cv2.dnn.NMSBoxes(
+            np.column_stack([boxes[:, :2], boxes[:, 2:] - boxes[:, :2]]).tolist(),
+            scores.tolist(),
+            CONF_THRESHOLD,
+            NMS_IOU,
+        )
+        keep = np.array(keep, dtype=int).reshape(-1)
+        boxes, scores, kpts = boxes[keep], scores[keep], kpts[keep]
+
+        # 모델 입력 좌표 → 원본 좌표
+        boxes[:, [0, 2]] = ((boxes[:, [0, 2]] - pad_x) / scale).clip(0, width - 1)
+        boxes[:, [1, 3]] = ((boxes[:, [1, 3]] - pad_y) / scale).clip(0, height - 1)
+        kpts[..., 0] = (kpts[..., 0] - pad_x) / scale
+        kpts[..., 1] = (kpts[..., 1] - pad_y) / scale
+
+        return boxes, scores, kpts
 
     def close(self):
         self.config_ctx.__exit__(None, None, None)
@@ -243,6 +300,31 @@ def correction(error_px, deg_per_px, dt):
     step = min(remaining * KP, MAX_SPEED * dt)
 
     return step if error_px > 0 else -step
+
+
+def face_point(box, keypoints):
+    """얼굴 중심 (보이는 코·눈의 평균, 둘 다 안 보이면 귀).
+
+    얼굴이 안 보이면(뒤돌았거나 화면 밖) 어깨나 박스로 머리 위치를 어림한다.
+    두 번째 값은 얼굴을 실제로 찾았는지 여부.
+    """
+    # 귀는 한쪽만 보이면 중심이 그쪽으로 치우치므로 코·눈을 먼저 씀
+    for indices in (FACE_KEYPOINTS, EAR_KEYPOINTS):
+        face = keypoints[indices]
+        visible = face[face[:, 2] >= KEYPOINT_CONF]
+        if len(visible) > 0:
+            return (visible[:, 0].mean(), visible[:, 1].mean()), True
+
+    shoulders = keypoints[SHOULDER_KEYPOINTS]
+    if (shoulders[:, 2] >= KEYPOINT_CONF).all():
+        shoulder_w = abs(shoulders[0, 0] - shoulders[1, 0])
+        return (
+            shoulders[:, 0].mean(),
+            shoulders[:, 1].mean() - shoulder_w * 0.6,
+        ), False
+
+    x1, y1, x2, y2 = box
+    return ((x1 + x2) / 2, y1 + (y2 - y1) * HEAD_Y_RATIO), False
 
 
 def box_iou(a, b):
@@ -425,7 +507,7 @@ def main():
         print(f"중앙 위치 설정: {command}", flush=True)
         time.sleep(1)
 
-        detector = HailoPersonDetector(MODEL_PATH)
+        detector = HailoPoseDetector(MODEL_PATH)
         stream = FrameStream(STREAM_PORT)
 
         camera = Picamera2()
@@ -445,7 +527,7 @@ def main():
         time.sleep(1)
 
         print("사람 추적 시작 (Hailo HAT)")
-        print("대상: 가장 크게 보이는 사람 한 명 (고르면 고정)")
+        print("대상: 가장 크게 보이는 사람 한 명의 얼굴 (고르면 고정)")
         print(f"탐색 범위: PAN {SCAN_MIN}~{SCAN_MAX}")
         print(f"결과 이미지: {RESULT_PATH}")
         print(f"카메라 화면: http://<라즈베리파이 IP>:{STREAM_PORT}")
@@ -462,7 +544,7 @@ def main():
 
             frame = camera.capture_array()
 
-            boxes, scores = detector.detect(frame)
+            boxes, scores, keypoints = detector.detect(frame)
 
             height, width = frame.shape[:2]
             screen_x = width // 2
@@ -470,6 +552,7 @@ def main():
 
             target_box = None
             target_point = None
+            target_face = None
 
             if len(boxes) > 0:
                 seen_frames += 1
@@ -500,19 +583,25 @@ def main():
                     int, boxes[target_index]
                 )
 
-                target_x = (x1 + x2) // 2
-                target_y = round(y1 + (y2 - y1) * AIM_Y_RATIO)
+                (target_x, target_y), face_found = face_point(
+                    boxes[target_index], keypoints[target_index]
+                )
 
-                # 화면 끝에 걸려 잘린 박스는 중심이 안쪽으로 치우치므로
-                # 잘린 쪽 끝을 조준해서 더 빨리 돌아감
-                at_left = x1 <= EDGE_MARGIN
-                at_right = x2 >= width - 1 - EDGE_MARGIN
-                if at_left and not at_right:
-                    target_x = x1
-                elif at_right and not at_left:
-                    target_x = x2
-                if y1 <= EDGE_MARGIN:
-                    target_y = y1
+                if face_found:
+                    target_face = keypoints[target_index][
+                        FACE_KEYPOINTS + EAR_KEYPOINTS
+                    ]
+                else:
+                    # 얼굴이 안 보이는데 박스가 화면 끝에 걸려 잘렸으면
+                    # 머리가 그 바깥에 있으므로 잘린 쪽 끝을 조준해서 더 빨리 돌아감
+                    at_left = x1 <= EDGE_MARGIN
+                    at_right = x2 >= width - 1 - EDGE_MARGIN
+                    if at_left and not at_right:
+                        target_x = x1
+                    elif at_right and not at_left:
+                        target_x = x2
+                    if y1 <= EDGE_MARGIN:
+                        target_y = y1
 
                 if abs(target_x - screen_x) > width * EDGE_SIDE_RATIO:
                     lost_side = 1 if target_x > screen_x else -1
@@ -557,6 +646,7 @@ def main():
                 )
 
                 target_status = (
+                    f"{'얼굴' if face_found else '얼굴 추정'} "
                     f"오차 X={error_x:.0f}, "
                     f"Y={error_y:.0f}"
                 )
@@ -674,6 +764,17 @@ def main():
                     (0, 255, 255),
                     2,
                 )
+
+                if target_face is not None:
+                    for fx, fy, conf in target_face:
+                        if conf >= KEYPOINT_CONF:
+                            cv2.circle(
+                                image,
+                                (round(fx), round(fy)),
+                                3,
+                                (0, 255, 0),
+                                -1,
+                            )
 
                 cv2.circle(
                     image,
