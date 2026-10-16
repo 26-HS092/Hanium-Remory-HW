@@ -726,21 +726,21 @@ def main():
                 error_x = smooth_x - screen_x
                 error_y = smooth_y - screen_y
 
-                pan = clamp(
-                    pan + pan_dir * correction(
-                        error_x, pan_deg_per_px, dt
-                    ),
-                    PAN_MIN,
-                    PAN_MAX,
+                wanted_pan = pan + pan_dir * correction(
+                    error_x, pan_deg_per_px, dt
                 )
+                wanted_tilt = tilt + tilt_dir * correction(
+                    error_y, tilt_deg_per_px, dt
+                )
+                pan = clamp(wanted_pan, PAN_MIN, PAN_MAX)
+                tilt = clamp(wanted_tilt, TILT_MIN, TILT_MAX)
 
-                tilt = clamp(
-                    tilt + tilt_dir * correction(
-                        error_y, tilt_deg_per_px, dt
-                    ),
-                    TILT_MIN,
-                    TILT_MAX,
-                )
+                # 더 돌아야 하는데 안전 범위 끝에 막힌 경우 (사람이 범위 밖)
+                limits = []
+                if wanted_pan != pan:
+                    limits.append(f"PAN {round(pan)}")
+                if wanted_tilt != tilt:
+                    limits.append(f"TILT {round(tilt)}")
 
                 target_box = (x1, y1, x2, y2)
                 target_point = (
@@ -753,6 +753,11 @@ def main():
                     f"오차 X={error_x:.0f}, "
                     f"Y={error_y:.0f}"
                 )
+                if limits:
+                    target_status += (
+                        f" | 각도 한계({', '.join(limits)}): "
+                        "사람이 회전 범위 밖"
+                    )
 
             elif mode == "track":
                 # 잠깐 안 보이면 마지막 각도 유지
