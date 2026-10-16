@@ -498,6 +498,38 @@ _loading_music = LoopPlayer(str(ROOT / "bgm" / "Loading.mp3"), volume=0.5)
 # 로딩 음악이 스피커를 쥐고 있는지. 메인 루프 스레드에서만 만진다.
 _loading_holds_speaker = False
 
+# 답을 말하기 전에 표정에 맞춰 까는 짧은 음악(1초 남짓).
+_EXPRESSION_JINGLES = {
+    "기쁨": ROOT / "bgm" / "Happy.wav",
+    "슬픔": ROOT / "bgm" / "Sad.wav",
+    "위로": ROOT / "bgm" / "Consolation.wav",
+    "경청": ROOT / "bgm" / "Hear.wav",
+    "놀람": ROOT / "bgm" / "Surprise.wav",
+    "평온": ROOT / "bgm" / "Peace.wav",
+}
+# 같은 음악이 매번 나오면 금방 질리셔서, 표정마다 한 번 울리면 한동안 쉰다.
+JINGLE_COOLDOWN_SEC = 10 * 60
+_last_jingle: dict[str, float] = {}
+
+
+def _play_expression_jingle(expression: str) -> None:
+    """답을 말하기 전에 그 표정의 음악을 낸다. 쉬는 중이면 건너뛴다.
+
+    스피커 잠금은 부르는 쪽이 쥔다. 메인 루프에서만 부른다.
+    """
+    path = _EXPRESSION_JINGLES.get(expression)
+    if not path:
+        return
+    now = time.monotonic()
+    last = _last_jingle.get(expression)
+    if last is not None and now - last < JINGLE_COOLDOWN_SEC:
+        return
+    _last_jingle[expression] = now
+    try:
+        play_wav(str(path))
+    except Exception as e:
+        print(f"⚠️  {expression} 음악 재생 실패: {e}")
+
 
 def _think_start(face=None) -> None:
     """다 들었다 — 답을 만드는 동안 생각하는 얼굴을 짓고 로딩 음악을 깐다.
@@ -1338,6 +1370,9 @@ def main() -> None:
             #     기본 목소리로 지정된 화자(device_settings["spk_id"])로 말한다.
             try:
                 with speaker_lock:
+                    # 안전 신호가 걸린 턴엔 음악을 깔지 않는다 — 답이 늦어지면 안 된다.
+                    if not risk:
+                        _play_expression_jingle(robot_expr)
                     with timed("TTS 스트리밍", timings):
                         tts_play(
                             reply,
