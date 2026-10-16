@@ -101,6 +101,20 @@ _ABUSE = [
     r"가둬", r"가뒀", r"내쫓", r"돈\S*\s*가져가",
 ]
 
+# ── 강조 관용구 ──────────────────────────────────────
+# 규칙이 '위험이 아니다' 라고 적극적으로 판단하는 표현. 표 1 의 '제외' 행이다.
+# LLM 은 보조용언이 끼면("힘들어 죽어버리겠네") 강조의 '~겠' 을 놓치고 자해로
+# 본다. 발화가 이 표현으로 끝나면 그 동사에 해당하는 LLM 판정은 받지 않는다
+# (IDIOM_GUARD). 끝날 때로 좁힌 것은 "아파 죽겠어, 그냥 다 끝내고 싶다" 처럼
+# 관용구 뒤에 진짜 신호가 이어지는 말까지 버리지 않으려는 것이다.
+# 켤지는 eval_safety.py 로 재고 정한다.
+_IDIOM = {
+    SELF_HARM: [r"죽(어버리|어)?겠"],
+    HARM_OTHERS: [r"죽여\s*(주|준|줘|줬)"],
+}
+_IDIOM_TAIL = r"[가-힣]{0,2}[\s.,!?~…]*$"   # 어미 한두 글자만 남아야 한다
+IDIOM_GUARD = False
+
 # ── 거친 말 ──────────────────────────────────────────
 _PROFANITY = [
     r"씨발", r"시발", r"씹", r"좆", r"개새끼", r"새끼야", r"병신",
@@ -195,7 +209,15 @@ def from_llm(kind: Optional[str]) -> Optional[Risk]:
     return builder("LLM") if builder else None
 
 
-def escalate(rule: Optional[Risk], llm_kind: Optional[str]) -> Optional[Risk]:
+def idiom_of(text: str, kind: str) -> Optional[str]:
+    """text 가 kind 를 부정하는 강조 관용구로 끝나면 그 부분을 준다."""
+    return _first_match(
+        (text or "").strip(), [p + _IDIOM_TAIL for p in _IDIOM.get(kind, [])]
+    )
+
+
+def escalate(rule: Optional[Risk], llm_kind: Optional[str], text: str = "",
+             idiom_guard: Optional[bool] = None) -> Optional[Risk]:
     """LLM 판정이 규칙 판정보다 급하면 그 Risk 를, 아니면 None 을 준다.
 
     규칙의 우선순위는 규칙끼리만 통한다. 규칙이 약한 쪽(거친 말·의료)을
@@ -205,6 +227,10 @@ def escalate(rule: Optional[Risk], llm_kind: Optional[str]) -> Optional[Risk]:
     """
     llm = from_llm(llm_kind)
     if llm is None:
+        return None
+    if idiom_guard is None:
+        idiom_guard = IDIOM_GUARD
+    if idiom_guard and idiom_of(text, llm.kind):
         return None
     if rule is None or _SEVERITY.index(llm.kind) < _SEVERITY.index(rule.kind):
         return llm

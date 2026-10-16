@@ -154,5 +154,36 @@ expect_escalate("약 두 알 먹어도 되나", "none", safety.MEDICAL)
 expect_escalate("씨발 며느리가 때렸어", "abuse", safety.ABUSE)
 expect_escalate("씨발 짜증나", "none", safety.PROFANITY)
 
+print("\n[관용구 가드] 발화가 관용구로 끝날 때만 LLM 판정을 막는다")
+
+
+def expect_guard(text: str, llm_kind, want):
+    global fails
+    rule = safety.classify(text)
+    up = safety.escalate(rule, llm_kind, text, idiom_guard=True)
+    final = up or rule
+    got = final.kind if final else None
+    good = got == want
+    if not good:
+        fails += 1
+    print(f"  {OK if good else NG} {text!r} + LLM={llm_kind} → {want}"
+          + ("" if good else f"  (나온 값: {got})"))
+
+
+expect_guard("힘들어 죽어버리겠네", "self_harm", None)
+expect_guard("아이고 힘들어 죽겠네!", "self_harm", None)
+expect_guard("이 노래 죽여준다", "harm_others", None)
+expect_guard("맛이 죽여주네", "harm_others", None)
+# 관용구 뒤에 말이 이어지면 막지 않는다
+expect_guard("아파 죽겠어 그냥 다 끝내고 싶다", "self_harm", safety.SELF_HARM)
+expect_guard("힘들어 죽겠다 정말, 더 살아서 뭐 하나 싶어", "self_harm", safety.SELF_HARM)
+# 관용구가 아닌 동사의 판정은 막지 않는다
+expect_guard("허리가 아파 죽겠어", "medical", safety.MEDICAL)
+# 가드는 기본으로 꺼져 있다
+_r = safety.escalate(None, "self_harm", "힘들어 죽어버리겠네")
+if not (_r and _r.kind == safety.SELF_HARM):
+    fails += 1
+print(f"  {OK if _r else NG} IDIOM_GUARD 기본값 꺼짐")
+
 print(f"\n{'모두 통과' if fails == 0 else str(fails) + '건 실패'}")
 raise SystemExit(1 if fails else 0)

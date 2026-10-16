@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>모리 미리보기</title>
+<style>
+  html,body{margin:0;height:100%;background:#1a1f25;color:#e8dccb;
+            font-family:system-ui,'Apple SD Gothic Neo',sans-serif;}
+  body{display:flex;gap:16px;padding:16px;box-sizing:border-box;}
+  #stage{flex:1;display:flex;flex-direction:column;gap:8px;min-width:0;}
+  /* 실제 화면 비율(800x480) 그대로 */
+  #frame{width:100%;aspect-ratio:800/480;border:0;border-radius:12px;background:#0e1216;}
+  #log{font-size:13px;color:#B9A88F;min-height:1.4em;}
+  #panel{width:300px;overflow-y:auto;display:flex;flex-direction:column;gap:14px;}
+  h3{margin:0 0 6px;font-size:13px;color:#FFD98A;}
+  .row{display:flex;flex-wrap:wrap;gap:6px;}
+  button{background:#2c3640;color:#e8dccb;border:0;border-radius:8px;padding:7px 10px;
+         font:600 13px inherit;cursor:pointer;}
+  button:hover{background:#3a4652;}
+  button.flow{background:#FFC95C;color:#2a1d05;width:100%;text-align:left;}
+  button.flow:hover{filter:brightness(.95);}
+</style>
+</head>
+<body>
+  <div id="stage">
+    <iframe id="frame" src="mori_face.html"></iframe>
+    <div id="log">버튼을 눌러 보세요. 예/아니오 버튼은 화면에서 직접 누르면 돼요.</div>
+  </div>
+
+  <div id="panel">
+    <div>
+      <h3>흐름 (소리 포함)</h3>
+      <div class="row" style="flex-direction:column">
+        <button class="flow" data-flow="talk">💬 대화: 모리야 → 듣기 → 생각 → 대답 → 종료</button>
+        <button class="flow" data-flow="med">💊 약 알림 → 복용 확인</button>
+        <button class="flow" data-flow="family">💌 가족 메시지·사진 → 답장 예/아니오 → 보냈어요</button>
+        <button class="flow" data-flow="fail">⚠️ 답장 못 보냈어요</button>
+      </div>
+    </div>
+    <div>
+      <h3>표정</h3>
+      <div class="row" id="emos"></div>
+    </div>
+    <div>
+      <h3>상태</h3>
+      <div class="row">
+        <button data-do="listen">듣는 중 (전구)</button>
+        <button data-do="think">생각 중 (점 3개)</button>
+        <button data-do="speak">말하기 (입)</button>
+        <button data-do="nod">끄덕</button>
+        <button data-do="stop">모두 끄기</button>
+      </div>
+    </div>
+    <div>
+      <h3>화면 카드</h3>
+      <div class="row">
+        <button data-do="ask">예/아니오</button>
+        <button data-do="n-pill">약 알림</button>
+        <button data-do="n-msg">메시지</button>
+        <button data-do="n-long">긴 메시지</button>
+        <button data-do="n-check">보냈어요</button>
+        <button data-do="n-fail">못 보냈어요</button>
+        <button data-do="photo">사진</button>
+        <button data-do="clear">카드 내리기</button>
+      </div>
+    </div>
+    <div>
+      <h3>효과음</h3>
+      <div class="row" id="cues"></div>
+    </div>
+  </div>
+
+<script>
+var CUES={wake:"cue_wake_4bc3716c",bye:"cue_bye_1bd885d3",
+  medicine:"cue_medicine_805ca1fd",message:"cue_message_d8063eee",sent:"cue_sent_e4792e5a",
+  tap:"cue_tap_98ba7778",poke:"cue_poke_1bb60bb0",pet:"cue_pet_86414365"};
+var PHOTO="data:image/svg+xml,"+encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">'+
+  '<stop offset="0" stop-color="#9fd3f5"/><stop offset="1" stop-color="#fbe3b8"/></linearGradient></defs>'+
+  '<rect width="800" height="600" fill="url(#g)"/><circle cx="640" cy="120" r="60" fill="#ffd56b"/>'+
+  '<rect y="430" width="800" height="170" fill="#8cc58a"/><text x="400" y="320" font-size="52" text-anchor="middle" '+
+  'font-family="sans-serif" fill="#4a3b2a">(가족 사진 자리)</text></svg>');
+
+var frame=document.getElementById("frame");
+function M(){return frame.contentWindow.Mori;}
+function fdoc(){return frame.contentDocument;}
+function log(s){document.getElementById("log").textContent=s;}
+var sleep=function(ms){return new Promise(function(r){setTimeout(r,ms);});};
+
+// ── 소리 ──
+function cue(name){return new Promise(function(res){
+  var a=new Audio("../audio/"+CUES[name]+".wav");a.onended=res;a.onerror=res;
+  a.play().catch(res);});}
+// 생각하는 동안 까는 음악. 서서히 커지고, 말을 시작하면 서서히 줄며 멈춘다.
+var bgm=new Audio("../bgm/Loading.mp3");bgm.loop=true;var BGM_VOL=0.5,bgmFade=null;
+function fadeTo(v,ms,then){clearInterval(bgmFade);var from=bgm.volume,t0=Date.now();
+  bgmFade=setInterval(function(){var k=Math.min(1,(Date.now()-t0)/ms);bgm.volume=from+(v-from)*k;
+    if(k>=1){clearInterval(bgmFade);if(then)then();}},30);}
+function loadingStart(){bgm.volume=0;bgm.currentTime=0;bgm.play().catch(function(){});fadeTo(BGM_VOL,600);}
+function loadingStop(){if(bgm.paused)return Promise.resolve();
+  return new Promise(function(res){fadeTo(0,300,function(){bgm.pause();res();});});}
+// 생각 시작: 점 3개 + 음악.
+async function think(){M().thinkStart();loadingStart();}
+async function thinkEnd(){M().thinkStop();await loadingStop();}
+
+// 모리 말소리는 브라우저 한국어 음성으로 대신한다. 말하는 동안 입이 움직인다.
+function say(text){return new Promise(function(res){
+  log("🐻 "+text);
+  var u=new SpeechSynthesisUtterance(text);u.lang="ko-KR";u.rate=1.05;
+  var v=speechSynthesis.getVoices().filter(function(x){return x.lang==="ko-KR";});
+  if(v.length)u.voice=v.find(function(x){return /Yuna|유나/.test(x.name);})||v[0];
+  var done=false;function end(){if(done)return;done=true;M().speakStop();res();}
+  u.onstart=function(){M().speakStart();};u.onend=end;u.onerror=end;
+  speechSynthesis.cancel();speechSynthesis.speak(u);
+  setTimeout(end,text.length*260+3000);   // 음성이 안 나와도 멈추지 않게
+});}
+// 어르신이 말씀하시는 척: 목소리 크기에 맞춰 전구가 밝아지고 쉴 때 끄덕인다.
+async function listen(ms,line){
+  log("👵 "+line);M().listenStart();
+  var end=Date.now()+ms,t=0;
+  while(Date.now()<end){var ph=t%1300;
+    if(ph<800)M().setLevel(0.35+Math.random()*0.6);
+    else{M().setLevel(0);if(ph<900)M().nod();}
+    await sleep(100);t+=100;}
+  M().setLevel(0);M().listenStop();
+}
+// 예/아니오를 직접 누를 때까지 기다린다.
+function waitAnswer(ms){return new Promise(function(res){
+  var d=fdoc(),y=d.getElementById("askYes"),n=d.getElementById("askNo"),tm;
+  function done(a){y.removeEventListener("click",fy);n.removeEventListener("click",fn);clearTimeout(tm);M().hideAsk();res(a);}
+  function fy(){done("yes");}function fn(){done("no");}
+  y.addEventListener("click",fy);n.addEventListener("click",fn);
+  tm=setTimeout(function(){done(null);},ms);});}
+
+// ── 흐름 (main.py 순서 그대로) ──
+var running=false;
+var FLOWS={
+  talk:async function(){
+    M().setEmotion("평온");await sleep(800);
+    log('👵 "모리야"');M().setEmotion("경청");await cue("wake");
+    var turns=[["오늘 손녀가 놀러 왔어","와, 손녀분이 오셨군요! 정말 반가우셨겠어요.","기쁨"],
+               ["요즘 좀 쓸쓸해","그러셨군요. 제가 옆에서 이야기 많이 들어드릴게요.","위로"]];
+    for(var i=0;i<turns.length;i++){
+      await listen(3000,turns[i][0]);
+      var w=think();await sleep(i===0?4000:1200);   // 첫 턴은 오래, 둘째는 짧게 생각
+      await w;await thinkEnd();
+      M().setEmotion(turns[i][2]);await say(turns[i][1]);M().setEmotion("평온");
+    }
+    log("👵 (아무 말 없음 → 대화 종료)");M().listenStart();await sleep(3000);M().listenStop();
+    await cue("bye");
+  },
+  med:async function(){
+    var steps=[["약 드실 시간이에요!","아침 식후에 혈압약 드실 시간이에요. 잊지 말고 꼭 챙겨 드세요."],
+               ["약 드셨어요?","혈압약 드셨어요? 아직 안 드셨으면 지금 꼭 챙겨 드세요."]];
+    for(var i=0;i<steps.length;i++){
+      M().setEmotion("평온");M().showNotice(steps[i][0],"혈압약","pill");
+      await cue("medicine");await say(steps[i][1]);M().hideNotice();
+      if(i===0){log("… 15분 뒤 …");await sleep(1500);}
+    }
+  },
+  family:async function(){await family(true);},
+  fail:async function(){await family(false);}
+};
+async function family(ok){
+  var who="딸 박수진";
+  M().setEmotion("기쁨");M().showNotice("엄마 오늘 저녁에 전화할게요!",who+"에게서","message");
+  await cue("message");await say(who+"에게서 메시지가 왔어요. 엄마 오늘 저녁에 전화할게요!");
+  M().hideNotice();M().setEmotion("평온");await sleep(600);
+  M().setEmotion("기쁨");M().showNotice("사진이 왔어요",who+"에게서","message");
+  await cue("message");await say(who+"이 사진을 보냈어요. 화면을 봐 주세요.");
+  M().hideNotice();M().setEmotion("평온");M().showPhoto(PHOTO);await sleep(2500);
+
+  M().showAsk(1,"답장하시겠어요?","가족 대화방으로 보내드려요");
+  var ans=waitAnswer(20000);
+  await say("가족 대화방에 답장하시겠어요? 화면에서 예나 아니오를 눌러 주세요.");
+  log("👉 화면에서 예/아니오를 눌러 보세요 (20초)");
+  var a=await ans;
+  if(a!=="yes"){log("💌 답장 여부: "+(a||"응답 없음"));if(a==="no")await say("네, 알겠어요.");
+    await sleep(1500);M().hidePhoto();return;}
+
+  M().showNotice("말씀해 주세요","가족 대화방에 보낼 답장","message");
+  await say("네, 말씀해 주세요. 목소리 그대로 보내드릴게요.");
+  await listen(3000,"그래 기다릴게, 사랑한다");
+  M().hideNotice();
+  var w=think();await sleep(3000);await w;await thinkEnd();
+  var t0=Date.now();
+  if(ok){M().showNotice("보냈어요!","가족 대화방에 답장이 올라갔어요","check");
+    await cue("sent");await say("가족 대화방에 답장을 보냈어요.");}
+  else{M().showNotice("못 보냈어요","조금 뒤에 다시 해 주세요","fail");
+    await say("답장을 보내지 못했어요. 조금 뒤에 다시 해 주세요.");}
+  var left=3000-(Date.now()-t0);if(left>0)await sleep(left);
+  M().hideNotice();M().showPhoto(PHOTO);await sleep(2500);M().hidePhoto();
+}
+
+function resetAll(){var m=M();speechSynthesis.cancel();bgm.pause();m.listenStop();m.thinkStop();m.speakStop();
+  m.hideNotice();m.hideAsk();m.hidePhoto();m.setEmotion("평온");}
+
+document.querySelectorAll("[data-flow]").forEach(function(b){b.onclick=async function(){
+  if(running){log("흐름이 진행 중이에요");return;}
+  running=true;resetAll();
+  try{await FLOWS[b.dataset.flow]();log("✓ 끝");}catch(e){log("오류: "+e);}
+  running=false;};});
+
+// ── 개별 버튼 ──
+["평온","기쁨","슬픔","위로","경청","놀람","수면"].forEach(function(e){
+  var b=document.createElement("button");b.textContent=e;b.onclick=function(){M().setEmotion(e);log("표정: "+e);};
+  document.getElementById("emos").appendChild(b);});
+Object.keys(CUES).forEach(function(c){
+  var b=document.createElement("button");b.textContent=c;b.onclick=function(){cue(c);log("🔔 "+c);};
+  document.getElementById("cues").appendChild(b);});
+var speakTimer=null;
+var DO={
+  listen:function(){listen(4000,"(말씀하시는 중)");},
+  think:function(){think();},
+  speak:function(){M().speakStart();clearTimeout(speakTimer);speakTimer=setTimeout(function(){M().speakStop();},3000);},
+  nod:function(){M().nod();},
+  stop:function(){M().listenStop();thinkEnd();M().speakStop();},
+  ask:function(){M().showAsk(1,"답장하시겠어요?","가족 대화방으로 보내드려요");},
+  "n-pill":function(){M().showNotice("약 드실 시간이에요!","혈압약","pill");},
+  "n-msg":function(){M().showNotice("엄마 오늘 저녁에 전화할게요!","딸 박수진에게서","message");},
+  "n-long":function(){M().showNotice("엄마 이번 주말에 애들 데리고 갈게요. 날씨 추우니까 따뜻하게 입고 계시고 약도 꼭 챙겨 드세요. 맛있는 거 사 갈게요!","딸 박수진에게서","message");},
+  "n-check":function(){M().showNotice("보냈어요!","가족 대화방에 답장이 올라갔어요","check");},
+  "n-fail":function(){M().showNotice("못 보냈어요","조금 뒤에 다시 해 주세요","fail");},
+  photo:function(){M().showPhoto(PHOTO);},
+  clear:function(){M().hideNotice();M().hideAsk();M().hidePhoto();}
+};
+document.querySelectorAll("[data-do]").forEach(function(b){b.onclick=function(){DO[b.dataset.do]();};});
+
+// 화면을 누르면 실제처럼 소리를 낸다: 예/아니오 '톡', 얼굴 톡 '뿅', 문지르기 '랄라'.
+frame.addEventListener("load",function(){
+  var d=fdoc();if(!d)return;
+  d.body.style.cursor="auto";d.getElementById("face").style.cursor="pointer";
+  ["askYes","askNo"].forEach(function(id){d.getElementById(id).addEventListener("click",function(){cue("tap");});});
+  var face=d.getElementById("face"),down=null,lastPet=0;
+  face.addEventListener("pointerdown",function(e){down={x:e.clientX,y:e.clientY,t:Date.now(),dist:0};});
+  face.addEventListener("pointermove",function(e){if(!down)return;
+    down.dist+=Math.hypot(e.clientX-down.x,e.clientY-down.y);down.x=e.clientX;down.y=e.clientY;
+    if(down.dist>60&&Date.now()-lastPet>1800){lastPet=Date.now();cue("pet");}});
+  face.addEventListener("pointerup",function(){if(!down)return;
+    if(Date.now()-down.t<400&&down.dist<25)cue("poke");down=null;});
+});
+speechSynthesis.getVoices();
+</script>
+</body>
+</html>

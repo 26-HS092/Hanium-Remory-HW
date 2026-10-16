@@ -11,6 +11,7 @@ Pi 설치: sudo apt install mpg123
 - 예: "plughw:1,0"  (aplay -l 에서 본 card 번호 사용. plughw 가 자동 리샘플링)
 - None 이면 시스템 default 로 재생.
 """
+from __future__ import annotations
 
 import math
 import platform
@@ -74,6 +75,80 @@ def play_mp3(path: str) -> None:
         ) from e
 
 
+def _mp3_cmd(path: str, volume: float) -> list[str] | None:
+    """mp3 를 한 번 재생하는 명령. 쓸 수 있는 재생기가 없으면 None."""
+    system = platform.system()
+    if system == "Linux":
+        if shutil.which("mpg123"):
+            cmd = ["mpg123", "-q"]
+            if SPEAKER_ALSA_DEVICE:
+                cmd.extend(["-a", SPEAKER_ALSA_DEVICE])
+            cmd.extend(["-f", str(int(32768 * volume))])   # -f: 32768=원음
+            return cmd + [path]
+        if shutil.which("ffplay"):
+            return ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
+                    "-af", f"volume={volume}", path]
+        return None
+    if system == "Darwin":
+        return ["afplay", "-v", str(volume), path]
+    return None
+
+
+class LoopPlayer:
+    """mp3 를 멈출 때까지 되풀이해 튼다. 생각하는 동안 까는 음악에 쓴다.
+
+    stop() 은 재생기가 완전히 꺼질 때까지 기다린다. 스피커(ALSA hw 장치)는
+    한 번에 하나만 열 수 있어서, 덜 꺼진 채로 TTS 가 aplay 를 열면 부딪친다.
+    """
+
+    def __init__(self, path: str, volume: float = 1.0):
+        self._path = str(path)
+        self._volume = volume * SPEAKER_VOLUME
+        self._stop = threading.Event()
+        # 재생기를 띄우는 순간과 끄는 순간이 엇갈려 하나가 남지 않게 한다.
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        cmd = _mp3_cmd(self._path, self._volume)
+        if not cmd or not Path(self._path).exists():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, args=(cmd,), daemon=True)
+        self._thread.start()
+
+    def _run(self, cmd: list[str]) -> None:
+        while True:
+            with self._lock:
+                if self._stop.is_set():
+                    return
+                try:
+                    self._proc = subprocess.Popen(
+                        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except OSError as e:
+                    print(f"⚠️  로딩 음악 재생 실패: {e}")
+                    return
+            self._proc.wait()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stop.set()
+            proc = self._proc
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        if self._thread:
+            self._thread.join(timeout=2)
+        self._thread = None
+
+
 def play_wav(path: str) -> None:
     """wav 파일을 스피커로 재생. Pi(Linux)에서는 aplay(ALSA), mac에서는 afplay.
 
@@ -123,7 +198,6 @@ def play_wav(path: str) -> None:
 # (음표, 울림) — 음표는 (시작 초, 주파수), 울림은 소리가 잦아드는 빠르기(초).
 CHIMES = {
     "wake":    (((0.00, 1046.5),), 0.16),                          # 띵 — 불렀을 때
-    "heard":   (((0.00, 784.0), (0.11, 1046.5)), 0.16),            # 또롱↑ — 다 들었어요
     "bye":     (((0.00, 1046.5), (0.11, 784.0)), 0.16),            # 또롱↓ — 이제 쉴게요
     "message": (((0.00, 659.3), (0.30, 523.3)), 0.30),             # 딩동 — 가족 메시지
     "sent":    (((0.00, 523.3), (0.09, 659.3), (0.18, 784.0), (0.27, 1046.5)), 0.16),  # 띠리링 — 보냈어요
