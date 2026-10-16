@@ -24,16 +24,41 @@ def create_detector(model_path, score_threshold=0.5, nms_threshold=0.3):
     )
 
 
-def detect_largest_face(detector, frame_bgr):
-    """가장 큰 얼굴 1개의 (x, y, w, h, score). 없으면 None."""
+def detect_faces(detector, frame_bgr):
+    """모든 얼굴의 (x, y, w, h, score) 목록. 큰 얼굴부터."""
     h, w = frame_bgr.shape[:2]
     detector.setInputSize((w, h))
     _, faces = detector.detect(frame_bgr)
     if faces is None or len(faces) == 0:
-        return None
+        return []
     faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
-    x, y, fw, fh = faces[0][:4]
-    return int(x), int(y), int(fw), int(fh), float(faces[0][14])
+    return [(int(f[0]), int(f[1]), int(f[2]), int(f[3]), float(f[14])) for f in faces]
+
+
+def detect_largest_face(detector, frame_bgr):
+    """가장 큰 얼굴 1개의 (x, y, w, h, score). 없으면 None."""
+    faces = detect_faces(detector, frame_bgr)
+    return faces[0] if faces else None
+
+
+def detect_face_near(detector, frame_bgr, point):
+    """point(x, y)가 들어 있는 얼굴 1개. 여러 개면 중심이 가장 가까운 것. 없으면 None.
+
+    얼굴 트래커가 따라가는 사람의 얼굴 위치를 주면, 화면에 다른 사람이 더 크게
+    보여도 그 사람 얼굴만 고른다.
+    """
+    px, py = point
+    best, best_dist = None, None
+    for face in detect_faces(detector, frame_bgr):
+        x, y, fw, fh = face[:4]
+        # 트래커의 얼굴 점(코·눈 평균)은 박스 안쪽에 오지만, 여유를 조금 둔다
+        margin = 0.25 * max(fw, fh)
+        if not (x - margin <= px <= x + fw + margin and y - margin <= py <= y + fh + margin):
+            continue
+        dist = (x + fw / 2 - px) ** 2 + (y + fh / 2 - py) ** 2
+        if best is None or dist < best_dist:
+            best, best_dist = face, dist
+    return best
 
 
 def crop_square(frame_bgr, det):

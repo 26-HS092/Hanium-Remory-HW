@@ -106,9 +106,18 @@ class EmotionAnalyzer:
             self._fer = _HSEmotionClassifier()
             print("🙂 감정 모델: HSEmotion (AffectNet 8감정)")
 
-    def analyze_frame(self, frame_bgr):
-        """프레임 1장 → (label, confidence) 또는 None(얼굴 없음)."""
-        det = face_crop.detect_largest_face(self._detector, frame_bgr)
+    def analyze_frame(self, frame_bgr, near=None):
+        """프레임 1장 → (label, confidence) 또는 None(얼굴 없음).
+
+        near: 얼굴 트래커가 따라가는 사람의 얼굴 위치 (x, y). 주면 그 사람 얼굴만,
+              없으면 가장 큰 얼굴을 본다.
+        """
+        if frame_bgr is None:
+            return None
+        if near is not None:
+            det = face_crop.detect_face_near(self._detector, frame_bgr, near)
+        else:
+            det = face_crop.detect_largest_face(self._detector, frame_bgr)
         if det is None:
             return None
         face = face_crop.crop_square(frame_bgr, det)
