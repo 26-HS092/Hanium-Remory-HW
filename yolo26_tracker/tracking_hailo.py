@@ -58,6 +58,12 @@ SCAN_SPEED = 30.0     # 탐색 회전 속도 (도/초)
 CONFIRM_FRAMES = 2    # 연속 몇 프레임 보여야 사람으로 확정할지
 LOST_TIMEOUT = 2.0    # 추적 중 이 시간(초) 동안 안 보이면 다시 탐색
 
+# 여러 명일 때 한 사람 고정 설정
+LOCK_TIMEOUT = 1.0    # 고정한 사람이 이 시간(초) 동안 안 보이면 다른 사람으로 바꿈
+MATCH_GATE = 1.0      # 이전 위치에서 (박스 너비 x 이 값) 넘게 떨어진 박스는 다른 사람
+HIST_WEIGHT = 0.5     # 옷 색 유사도를 얼마나 믿을지 (사람끼리 겹칠 때 구분용)
+MIN_HIST_SIM = 0.3    # 여러 명일 때 옷 색이 이보다 다르면 대상이 아니라고 봄
+
 # 탐지 설정
 CONF_THRESHOLD = 0.4
 PERSON_CLASS = 0
@@ -234,6 +240,112 @@ def correction(error_px, deg_per_px, dt):
     return step if error_px > 0 else -step
 
 
+def box_iou(a, b):
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (
+        (a[2] - a[0]) * (a[3] - a[1])
+        + (b[2] - b[0]) * (b[3] - b[1])
+        - inter
+    )
+    return inter / union if union > 0 else 0.0
+
+
+def torso_histogram(frame, box):
+    """상체 가운데 부분의 색 분포 (옷 색으로 사람 구분)."""
+    x1, y1, x2, y2 = box
+    w, h = x2 - x1, y2 - y1
+    crop = frame[
+        int(y1 + h * 0.2):int(y1 + h * 0.6),
+        int(x1 + w * 0.25):int(x2 - w * 0.25),
+    ]
+    if crop.size == 0:
+        return None
+
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1], None, [16, 16], [0, 180, 0, 256])
+    return cv2.normalize(hist, hist).flatten()
+
+
+class TargetLock:
+    """한 사람을 고르면, 다른 사람이 더 크게 보여도 그 사람만 계속 따라간다."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.box = None
+        self.hist = None
+        self.last_match = 0.0
+
+    def update(self, frame, boxes, now):
+        """이번 프레임에서 고정 대상의 인덱스를 반환 (안 보이면 None)."""
+        if self.box is not None and now - self.last_match > LOCK_TIMEOUT:
+            self.reset()
+
+        if len(boxes) == 0:
+            return None
+
+        if self.box is None:
+            # 새로 고를 때는 가장 크게 보이는(가까운) 사람
+            areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+            index = int(areas.argmax())
+        else:
+            index = self._match(frame, boxes)
+            if index is None:
+                return None
+
+        # 다른 사람과 겹쳐 있으면 옷 색이 섞이므로 기억을 갱신하지 않음
+        overlapped = any(
+            box_iou(boxes[index], other) > 0
+            for i, other in enumerate(boxes) if i != index
+        )
+        hist = None if overlapped else torso_histogram(frame, boxes[index])
+        if hist is not None:
+            if self.hist is None:
+                self.hist = hist
+            else:
+                self.hist = 0.8 * self.hist + 0.2 * hist
+
+        self.box = boxes[index].copy()
+        self.last_match = now
+        return index
+
+    def _match(self, frame, boxes):
+        px1, py1, px2, py2 = self.box
+        prev_w = max(px2 - px1, 60.0)
+        prev_cx, prev_cy = (px1 + px2) / 2, (py1 + py2) / 2
+
+        best_index = None
+        best_score = -np.inf
+
+        for index, box in enumerate(boxes):
+            cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+            distance = np.hypot(cx - prev_cx, cy - prev_cy) / prev_w
+            if distance > MATCH_GATE:
+                continue
+
+            score = box_iou(self.box, box) - 0.5 * distance
+
+            # 후보가 여럿이면 옷 색으로도 비교
+            if len(boxes) > 1 and self.hist is not None:
+                hist = torso_histogram(frame, box)
+                if hist is not None:
+                    similarity = cv2.compareHist(
+                        self.hist, hist, cv2.HISTCMP_CORREL
+                    )
+                    if similarity < MIN_HIST_SIM:
+                        continue
+                    score += HIST_WEIGHT * similarity
+
+            if score > best_score:
+                best_score = score
+                best_index = index
+
+        return best_index
+
+
 def send_angles(arduino, pan, tilt):
     command = f"{round(pan)},{round(tilt)}"
 
@@ -265,6 +377,7 @@ def main():
     # "scan": 좌우로 돌며 찾기, "track": 찾은 사람 추적
     mode = "scan"
     scan_direction = 1
+    lock = TargetLock()
     seen_frames = 0
     last_seen = 0.0
 
@@ -315,7 +428,7 @@ def main():
         time.sleep(1)
 
         print("사람 추적 시작 (Hailo HAT)")
-        print("대상: 가장 크게 보이는 사람 한 명")
+        print("대상: 가장 크게 보이는 사람 한 명 (고르면 고정)")
         print(f"탐색 범위: PAN {SCAN_MIN}~{SCAN_MAX}")
         print(f"결과 이미지: {RESULT_PATH}")
         print(f"카메라 화면: http://<라즈베리파이 IP>:{STREAM_PORT}")
@@ -351,20 +464,18 @@ def main():
                 mode = "track"
                 smooth_x = None
                 smooth_y = None
+                lock.reset()
                 print("사람 발견: 추적 시작", flush=True)
 
             elif mode == "track" and now - last_seen > LOST_TIMEOUT:
                 mode = "scan"
                 print("사람 놓침: 다시 탐색", flush=True)
 
-            if mode == "track" and len(boxes) > 0:
-                # 가장 큰 사람 선택
-                areas = (
-                    (boxes[:, 2] - boxes[:, 0])
-                    * (boxes[:, 3] - boxes[:, 1])
-                )
-                target_index = int(areas.argmax())
+            target_index = None
+            if mode == "track":
+                target_index = lock.update(frame, boxes, now)
 
+            if target_index is not None:
                 x1, y1, x2, y2 = map(
                     int, boxes[target_index]
                 )
@@ -416,9 +527,10 @@ def main():
 
             elif mode == "track":
                 # 잠깐 안 보이면 마지막 각도 유지
+                # (다른 사람만 보여도 LOCK_TIMEOUT 동안은 넘어가지 않음)
                 smooth_x = None
                 smooth_y = None
-                target_status = "사람 없음: 각도 유지"
+                target_status = "대상 안 보임: 각도 유지"
 
             else:
                 # 좌우 끝까지 돌고 방향 전환, 틸트는 중앙
