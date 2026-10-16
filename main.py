@@ -507,24 +507,13 @@ _EXPRESSION_JINGLES = {
     "놀람": ROOT / "bgm" / "Surprise.wav",
     "평온": ROOT / "bgm" / "Peace.wav",
 }
-# 같은 음악이 매번 나오면 금방 질리셔서, 표정마다 한 번 울리면 한동안 쉰다.
-JINGLE_COOLDOWN_SEC = 10 * 60
-_last_jingle: dict[str, float] = {}
 
 
 def _play_expression_jingle(expression: str) -> None:
-    """답을 말하기 전에 그 표정의 음악을 낸다. 쉬는 중이면 건너뛴다.
-
-    스피커 잠금은 부르는 쪽이 쥔다. 메인 루프에서만 부른다.
-    """
+    """답을 말하기 전에 그 표정의 음악을 낸다. 스피커 잠금은 부르는 쪽이 쥔다."""
     path = _EXPRESSION_JINGLES.get(expression)
     if not path:
         return
-    now = time.monotonic()
-    last = _last_jingle.get(expression)
-    if last is not None and now - last < JINGLE_COOLDOWN_SEC:
-        return
-    _last_jingle[expression] = now
     try:
         play_wav(str(path))
     except Exception as e:
