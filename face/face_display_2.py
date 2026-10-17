@@ -22,6 +22,7 @@ class FaceDisplay2:
         self._host, self._port = host, port
         self._clients = set()
         self._cur_expr = "평온"
+        self._ready_app = False      # 앱 준비가 끝났는지. 끝나기 전엔 화면이 로딩을 띄운다.
         self._listening = False
         self._thinking = False
         self._notice = None          # (제목, 부제) — 안내가 떠 있는 동안만
@@ -38,9 +39,12 @@ class FaceDisplay2:
         self._last_level = 0.0
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
+        self._boot_error = None
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         self._ready.wait(timeout=5)   # 서버가 listen 시작할 때까지 대기
+        if self._boot_error:          # 포트가 이미 쓰이는 중 등 — 부른 쪽이 알게 한다
+            raise self._boot_error
 
     def _run(self):
         asyncio.set_event_loop(self._loop)
@@ -51,6 +55,8 @@ class FaceDisplay2:
                 # 새로 연결되면 현재 표정을 즉시 동기화
                 await ws.send(json.dumps({"cmd": "emotion", "name": self._cur_expr},
                                          ensure_ascii=False))
+                if self._ready_app:
+                    await ws.send(json.dumps({"cmd": "ready"}))
                 if self._listening:
                     await ws.send(json.dumps({"cmd": "listen_start"}))
                 if self._thinking:
@@ -71,7 +77,12 @@ class FaceDisplay2:
             await websockets.serve(handler, self._host, self._port)
             self._ready.set()
 
-        self._loop.run_until_complete(boot())
+        try:
+            self._loop.run_until_complete(boot())
+        except OSError as e:
+            self._boot_error = e
+            self._ready.set()
+            return
         self._loop.run_forever()
 
     def _on_message(self, raw):
@@ -116,6 +127,11 @@ class FaceDisplay2:
         """label: 기쁨 | 슬픔 | 위로 | 경청 | 놀람 | 평온  (+수면)"""
         self._cur_expr = label
         self._send({"cmd": "emotion", "name": label})
+
+    def set_ready(self):
+        """앱 준비가 끝났다고 알린다. 화면이 로딩을 걷고 얼굴을 보인다."""
+        self._ready_app = True
+        self._send({"cmd": "ready"})
 
     def listen_start(self):
         """어르신 말을 듣기 시작했다 — 화면에 불을 켠다.

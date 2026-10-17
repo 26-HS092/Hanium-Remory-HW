@@ -16,6 +16,7 @@ main.py
     python main.py
 """
 
+import errno
 import hashlib
 import os
 import queue
@@ -134,7 +135,8 @@ from conversation_log import ConversationLogger  # noqa: E402
 from groq import Groq                        # noqa: E402
 from mic_vad import LiveRecorder            # noqa: E402
 from audio_out import (                                                # noqa: E402
-    play_wav, synthesize_and_play_stream, make_chime_wav, CHIMES, LoopPlayer,
+    play_wav, synthesize_and_play_stream, synthesize_and_play_fish,
+    make_chime_wav, CHIMES, LoopPlayer,
 )
 from wakeword import MoriyaWakeWordDetector
 try:
@@ -1098,6 +1100,25 @@ def main() -> None:
     print(f"  환자 ID: {PATIENT_ID}")
     print("=" * 50)
 
+    # 🖥️ 얼굴 화면을 제일 먼저 켠다. 아래 STT·카메라·RAG 준비가 수십 초 걸려서,
+    #    그 뒤에 켜면 그동안 화면이 비어 있다. 브라우저는 2초마다 다시 붙는다.
+    face = None
+    if FaceDisplay is not None:
+        try:
+            face = FaceDisplay()
+            face.set_expression("평온")
+            print("🖥️  표정 디스플레이 활성화")
+        except OSError as e:
+            if e.errno != errno.EADDRINUSE:
+                raise
+            # 부팅 때 자동으로 켜진 모리 앱(systemd 서비스)이 이미 돌고 있다.
+            # 둘이 같이 돌면 카메라·마이크도 겹치니 여기서 끝낸다.
+            print("⛔ 모리 앱이 이미 실행 중입니다(화면 포트 8765 사용 중).")
+            print("   직접 실행하려면 먼저: systemctl --user stop mori")
+            sys.exit(1)
+        except Exception as e:
+            print(f"⚠️  표정 디스플레이 비활성화: {e}")
+
     stt           = STTHandler()
 
     # 대화 내용 저장기(백엔드가 나중에 파일에서 가져감)
@@ -1144,15 +1165,6 @@ def main() -> None:
     except Exception as e:
         print(f"⚠️  RAG 워밍업 건너뜀(데이터 아직 없음): {e}")
 
-    face = None
-    if FaceDisplay is not None:
-        try:
-            face = FaceDisplay()
-            face.set_expression("평온")
-            print("🖥️  표정 디스플레이 활성화")
-        except Exception as e:
-            print(f"⚠️  표정 디스플레이 비활성화: {e}")
-
     # 🔔 효과음. 워커들이 쓰기 전에 만들어 둔다.
     _prepare_cues()
     if face:
@@ -1187,6 +1199,10 @@ def main() -> None:
     # 🧠 RAG 동기화 워커(앱에 올린 사진·추억을 인형 대화에 반영)
     threading.Thread(target=rag_sync_worker, args=(vision_model,), daemon=True).start()
     print("🧠 RAG 동기화 워커 시작")
+
+    # 준비가 다 끝났으니 화면의 로딩을 걷고 얼굴을 보인다.
+    if face:
+        face.set_ready()
 
     mic_wav   = str(ROOT / "input.wav")
 

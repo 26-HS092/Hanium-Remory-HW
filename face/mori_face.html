@@ -43,6 +43,22 @@
   #askYes{background:#FFC95C;color:#2a1d05;}
   #askNo{background:#3a4652;color:#e8dccb;}
   #askBtns button:active{transform:scale(.96);filter:brightness(.9);}
+  /* 앱(main.py)이 켜지는 동안 덮는 로딩 화면. 앱이 준비 끝(ready)을 보내면 걷히고,
+     연결이 끊기면 다시 덮는다.
+     무엇보다 위에 둔다 — 연결 전에는 얼굴도 안내도 움직이지 않는다. */
+  #loading{position:fixed;inset:0;z-index:20;display:flex;
+           flex-direction:column;align-items:center;justify-content:center;gap:6vh;
+           background:#0e1216;font-family:system-ui,'Apple SD Gothic Neo',sans-serif;
+           transition:opacity .6s ease;}
+  #loading.gone{opacity:0;pointer-events:none;}
+  #loadDots{display:flex;gap:4vh;}
+  #loadDots span{width:5vh;height:5vh;border-radius:50%;background:#FFC95C;
+                 animation:loadBounce 1.2s ease-in-out infinite;}
+  #loadDots span:nth-child(2){animation-delay:.2s;}
+  #loadDots span:nth-child(3){animation-delay:.4s;}
+  @keyframes loadBounce{0%,60%,100%{transform:translateY(0);opacity:.45}
+                        30%{transform:translateY(-3vh);opacity:1}}
+  #loadText{font-size:8vh;font-weight:700;color:#B9A88F;}
 </style>
 </head>
 <body>
@@ -116,6 +132,12 @@
 
   <!-- 가족이 보낸 사진 (평소엔 숨김) -->
   <img id="photo" alt="">
+
+  <!-- 앱이 켜지는 동안의 로딩 화면 (앱이 ready 를 보내면 걷힘) -->
+  <div id="loading">
+    <div id="loadDots"><span></span><span></span><span></span></div>
+    <div id="loadText">모리가 일어나는 중이에요</div>
+  </div>
 
 <script>
 (function(){
@@ -274,11 +296,13 @@
                showAsk:showAsk, hideAsk:hideAsk};
 
   // WebSocket 제어 채널 (파이썬 FaceDisplay 가 명령을 보냄)
+  var loadEl=document.getElementById("loading"),loadTimer=null;
   function connect(){
     var ws;try{ws=new WebSocket(WS_URL);}catch(e){setTimeout(connect,2000);return;}
     sock=ws;
     ws.onmessage=function(ev){var m;try{m=JSON.parse(ev.data);}catch(e){return;}
-      if(m.cmd==="emotion")setEmotion(m.name);
+      if(m.cmd==="ready"){clearTimeout(loadTimer);loadEl.classList.add("gone");}
+      else if(m.cmd==="emotion")setEmotion(m.name);
       else if(m.cmd==="speak_start"){speaking=true;thinking=false;}
       else if(m.cmd==="speak_stop")speaking=false;
       else if(m.cmd==="photo")showPhoto(m.url);
@@ -293,7 +317,10 @@
       else if(m.cmd==="notice_hide")hideNotice();
       else if(m.cmd==="ask")showAsk(m.id,m.title,m.sub);
       else if(m.cmd==="ask_hide")hideAsk();};
-    ws.onclose=function(){setTimeout(connect,2000);};
+    // 앱이 다시 켜지는 중이면 로딩 화면을 다시 덮는다. 잠깐 끊긴 거면 깜빡이지 않게 조금 기다린다.
+    ws.onclose=function(){clearTimeout(loadTimer);
+      loadTimer=setTimeout(function(){loadEl.classList.remove("gone");},3000);
+      setTimeout(connect,1000);};
     ws.onerror=function(){try{ws.close();}catch(e){}};
   }
   connect();

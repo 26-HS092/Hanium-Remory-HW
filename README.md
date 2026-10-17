@@ -261,7 +261,7 @@ python main.py
 얼굴 화면은 따로 띄웁니다.
 
 ```bash
-chromium-browser --kiosk face/mori_face.html
+chromium --kiosk face/mori_face.html
 ```
 
 ### 6. 테스트
