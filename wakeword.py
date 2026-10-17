@@ -7,6 +7,7 @@ wakeword.py
     마이크 입력 → openWakeWord embedding → moriya_v0.onnx → score
 """
 
+import os
 import time
 import queue
 import urllib.request
@@ -25,6 +26,9 @@ BUFFER_SAMPLES = int(SAMPLE_RATE * TARGET_SECONDS)
 
 INFER_INTERVAL_SEC = 0.25
 DETECTION_COOLDOWN_SEC = 2.0
+
+# 켜면 1초마다 그동안의 최고 점수와 마이크 음량(RMS)을 찍는다. 안 깨어날 때 원인 찾기용.
+WAKE_DEBUG = bool(os.getenv("WAKE_DEBUG"))
 
 
 def load_audio_features_class():
@@ -226,6 +230,8 @@ class MoriyaWakeWordDetector:
 
         last_infer_time = 0.0
         last_detection_time = 0.0
+        debug_t = time.time()
+        debug_max = 0.0
 
         def audio_callback(indata, frames, time_info, status):
             if status:
@@ -273,7 +279,12 @@ class MoriyaWakeWordDetector:
                     print("웨이크워드 추론 오류:", repr(e))
                     continue
 
-                #print(f"wake score: {score:.3f}")
+                if WAKE_DEBUG:
+                    debug_max = max(debug_max, score)
+                    if now - debug_t >= 1.0:
+                        rms = float(np.sqrt(np.mean(audio_np[-SAMPLE_RATE:].astype(np.float32) ** 2)))
+                        print(f"wake max={debug_max:.3f} rms={rms:.0f}", flush=True)
+                        debug_t, debug_max = now, 0.0
 
                 if score >= self.threshold:
                     if now - last_detection_time >= DETECTION_COOLDOWN_SEC:

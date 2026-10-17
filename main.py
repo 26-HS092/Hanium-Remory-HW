@@ -102,7 +102,7 @@ reply_wake = threading.Event()
 MIC_DEVICE_INDEX = None
 
 WAKEWORD_DEVICE_INDEX = None
-WAKEWORD_THRESHOLD = 0.9
+WAKEWORD_THRESHOLD = 0.8
 
 CONVERSATION_IDLE_TIMEOUT_SEC = 15
 
@@ -133,7 +133,7 @@ from datamark import new_mark, strip_marks, instruction as datamark_instruction 
 from conversation_log import ConversationLogger  # noqa: E402
 
 from groq import Groq                        # noqa: E402
-from mic_vad import LiveRecorder            # noqa: E402
+from mic_vad import LiveRecorder, MicTap, strip_echo_prefix   # noqa: E402
 from audio_out import (                                                # noqa: E402
     play_wav, synthesize_and_play_stream, synthesize_and_play_fish,
     make_chime_wav, CHIMES, LoopPlayer,
@@ -163,7 +163,7 @@ except Exception as _e:                          # pragma: no cover
     create_presence = None
     print(f"⚠️  mmWave 모듈 import 실패 → 늘 사람이 있는 것처럼 동작: {_e}")
 
-# 웨이크워드가 들렸을 때 카메라가 이 시간 안에 사람을 잡고 있었어야 대화를 시작한다.
+# 웨이크워드가 들렸을 때 카메라가 이 시간 안에 사람을 못 잡았으면 빠르게 찾게 한다.
 WAKE_NEEDS_TARGET_SEC = 3.0
 
 
@@ -325,6 +325,23 @@ def speak(text: str) -> None:
     기본 목소리로 지정된 화자(device_settings["spk_id"])로 말한다. None 이면 서버 기본.
     """
     tts_play(text)
+
+
+def _open_mic_tap() -> MicTap | None:
+    """인형이 말하는 동안 마이크를 미리 연다. 못 열면 None(그러면 말이 끝난 뒤에 연다)."""
+    try:
+        return MicTap(input_device_index=MIC_DEVICE_INDEX)
+    except Exception as e:
+        print(f"⚠️  말끝 겹쳐 듣기 마이크 열기 실패: {e}")
+        return None
+
+
+def _close_mic_tap(tap: MicTap | None) -> None:
+    if tap is not None:
+        try:
+            tap.close()
+        except Exception as e:
+            print(f"⚠️  말끝 겹쳐 듣기 마이크 닫기 실패: {e}")
 
 
 def tts_play(text: str, on_start=None) -> None:
@@ -1148,7 +1165,7 @@ def main() -> None:
     conv_session_id: str | None = None
 
     wakeword_detector = MoriyaWakeWordDetector(
-        moriya_model_path=ROOT / "models" / "moriya_v1.onnx",
+        moriya_model_path=ROOT / "models" / "moriya_v5.onnx",
         models_dir=ROOT / "models",
         threshold=WAKEWORD_THRESHOLD,
         input_device_index=WAKEWORD_DEVICE_INDEX,
@@ -1238,6 +1255,9 @@ def main() -> None:
 
     consecutive_errors = 0
     conversation_active = False
+    # 인형이 말하는 동안 열어 둔 마이크. 다음 녹음이 이어 써서 말끝과 겹친 대답도 듣는다.
+    mic_tap = None
+    last_reply = ""
     # 이번 대화(웨이크워드~종료)에서 몇 번 주고받았는지. 끝날 때 일과로 남긴다.
     turns_this_session = 0
 
@@ -1246,10 +1266,14 @@ def main() -> None:
             # 가족 메시지를 읽어드린 뒤라면 답장부터 여쭙는다.
             reply_req = _take_reply_request()
             if reply_req:
+                _close_mic_tap(mic_tap)     # 답장 녹음이 마이크를 쓴다
+                mic_tap = None
                 listen_for_reply(reply_req, stt, mic_wav, face)
                 continue
 
             if not conversation_active:
+                _close_mic_tap(mic_tap)     # 웨이크워드 대기가 마이크를 쓴다
+                mic_tap = None
                 if face:
                     face.set_expression("평온")
 
@@ -1265,12 +1289,13 @@ def main() -> None:
                 ):
                     continue
 
-                # 카메라가 잡고 있는 사람이 부른 게 아니면 대화를 시작하지 않는다.
+                # 카메라에 잡힌 사람이 없어도 대화는 시작한다. 대신 바로 빠르게 찾는다.
                 if hasattr(tracker, "has_target") and not tracker.has_target(
                     WAKE_NEEDS_TARGET_SEC
                 ):
-                    print("👀 웨이크워드는 들렸지만 카메라에 잡힌 사람이 없어 넘어감")
-                    continue
+                    print("👀 카메라에 잡힌 사람이 없음 — 대화는 시작하고 빠르게 찾는다")
+                    if hasattr(tracker, "seek"):
+                        tracker.seek()
                 dnd = device_settings["dnd"]
                 if in_dnd(dnd) and not (dnd or {}).get("allowWakeWord", True):
                     print("🔕 방해 금지 시간 — 조용히 대기")
@@ -1310,6 +1335,7 @@ def main() -> None:
             recording.set()
             if face:
                 face.listen_start()
+            tap, mic_tap = mic_tap, None    # 녹음기가 이어 쓰고 닫는다
             try:
                 with timed("녹음+VAD", timings):
                     wav_path = recorder.record_until_silence(
@@ -1320,6 +1346,7 @@ def main() -> None:
                         # 듣는 동안 목소리에 맞춰 전구가 밝아지고, 쉬실 때 끄덕인다.
                         on_level=(face.listen_level if face else None),
                         on_pause=(face.nod if face else None),
+                        tap=tap,
                     )
             finally:
                 recording.clear()
@@ -1349,6 +1376,11 @@ def main() -> None:
             # ② STT
             with timed("STT", timings):
                 user_text, stt_elapsed = stt.transcribe(wav_path)
+            if recorder.used_overlap and last_reply:
+                cleaned = strip_echo_prefix(user_text, last_reply)
+                if cleaned != user_text:
+                    print(f"↩️  섞여 들어간 모리 말 지움: {user_text!r} → {cleaned!r}")
+                    user_text = cleaned
             print(f"🗣️  이용자: {user_text}   ({stt_elapsed:.2f}s)")
             if not user_text:
                 _think_stop(face)
@@ -1430,11 +1462,16 @@ def main() -> None:
                     # 안전 신호가 걸린 턴엔 음악을 깔지 않는다 — 답이 늦어지면 안 된다.
                     if not risk:
                         _play_expression_jingle(robot_expr)
+                    # 말하는 동안 마이크를 미리 열어 둔다. 말끝과 겹쳐 대답하셔도 듣는다.
+                    mic_tap = _open_mic_tap()
                     with timed("TTS 스트리밍", timings):
                         tts_play(
                             reply,
                             on_start=(face.start_speaking if face else None),
                         )
+                    if mic_tap:
+                        mic_tap.end()
+                    last_reply = reply
             finally:
                 if face:
                     face.stop_speaking()
@@ -1454,6 +1491,8 @@ def main() -> None:
             consecutive_errors += 1
             print(f"❌ 에러: {e}")
             _think_stop(face)   # 생각하는 얼굴·음악이 남아 있지 않게
+            _close_mic_tap(mic_tap)
+            mic_tap = None
             if consecutive_errors >= 5:
                 print("⛔ 같은 에러가 반복됩니다. 마이크 장치(MIC_DEVICE_INDEX) 설정을 확인하세요. 종료합니다.")
                 break
@@ -1462,6 +1501,7 @@ def main() -> None:
 
     # 음악 재생기는 따로 도는 프로세스라, 끄지 않으면 종료 뒤에도 계속 울린다.
     _loading_stop()
+    _close_mic_tap(mic_tap)
 
     # 어떤 이유로 멈추든 앱에 '대화중'이 남지 않게 한다.
     # 곧 프로세스가 끝나므로 대기열 대신 직접 보낸다.
