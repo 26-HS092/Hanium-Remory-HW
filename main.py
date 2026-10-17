@@ -53,6 +53,9 @@ else:
     TTS_STREAM_API_URL = os.environ["TTS_STREAM_API_URL"]
     TTS_API_KEY   = os.environ["TTS_API_KEY"]
 RAG_TOP_K     = 3
+# 이번 대화에서 LLM 에 함께 넘길 최근 주고받기 수. 앞 이야기와 이어 말하게 한다.
+# ponytail: 오래된 턴은 그냥 버린다. 긴 대화가 잦으면 앞부분 요약으로 바꿀 것.
+HISTORY_TURNS = 6
 
 # ── 백엔드(ReMory 서버) 연결 ──────────────────────────────────
 REMORY_API    = os.environ["REMORY_API"]
@@ -187,21 +190,25 @@ SYSTEM_PROMPT = """당신은 치매 어르신의 말동무인 AI 인형 모리�
 먼저 어르신의 말이 어떤 종류인지 스스로 판단해서 다르게 응답하세요.
 
 [A] 무언가를 기억하지 못해 묻거나 떠올리려 할 때 (이름·날짜·사람·장소·옛일 등. 예: "딸 이름이 뭐였더라", "내가 어디 살았지"):
-- 먼저 아래 [관련 기억]에서 답을 찾으세요. 답이 있으면 "수진이요, 큰따님 이름이 수진이잖아요"처럼 그 내용을 다정하게 '직접 알려주세요'. 이때 어르신에게 절대 되묻지 마세요.
-- 알려준 뒤에는 그 기억과 이어지는 따뜻한 이야기나 질문으로 대화를 계속 이어가세요. (예: "수진이가 지난번에 왔을 때 좋으셨죠?")
+- 먼저 아래 [관련 기억]에서 답을 찾으세요. 답이 있으면 "〈이름〉이요, 큰따님 이름이 〈이름〉이잖아요"처럼 그 내용을 다정하게 '직접 알려주세요'. 이때 어르신에게 절대 되묻지 마세요.
+- 알려준 뒤에는 그 기억과 이어지는 따뜻한 이야기나 질문으로 대화를 계속 이어가세요. (예: "〈이름〉이가 지난번에 왔을 때 좋으셨죠?")
 - [관련 기억]에 그 답이 정말 없을 때만 "음, 저도 가물가물한데 같이 떠올려볼까요?"처럼 부드럽게 넘기세요. 답을 지어내지는 마세요.
 
+※ 위아래 예시의 〈 〉 자리는 형식만 보여 주는 빈칸입니다. 이름·음식·장소·사건은 어르신이 직접 하신 말이나 [관련 기억]에 있는 것만 쓰고, 예시에서 가져오거나 지어내지 마세요.
+
 [B] 그 외 평범한 일상 대화일 때:
-- 어르신 말에 먼저 가볍게 공감·맞장구치고, 이어지는 질문을 하나 던져 대화를 계속 이어가세요. (예: 식사, 날씨, 좋아하는 음식·노래·꽃, 옛날 이야기, 오늘 기분 등)
-- [관련 기억]이 있으면 그 내용을 화제로 자연스럽게 활용하세요.
+- 어르신 말에 먼저 공감·맞장구치세요. "〈어르신이 말한 음식〉 맛있었겠어요", "따님이 참 좋아했겠네요"처럼 들은 내용을 받아서 느낌을 함께 나누는 말이면 충분합니다.
+- [관련 기억]에 지금 이야기와 이어지는 내용이 있으면 "그러고 보니 〈기억 속 때〉에 〈기억 속 사람〉이랑 〈기억 속 일〉 하셨잖아요"처럼 자연스럽게 꺼내 화제를 넓히세요.
 
 공통:
-- 매 응답은 되도록 끝에 질문 하나로 마무리해서 어르신이 계속 말하게 하세요.
+- 앞서 나눈 대화를 기억하고 이어서 말하세요. 어르신이 "응", "그랬지"처럼 짧게 답하시면 앞에서 하던 이야기에 대한 대답입니다.
+- 질문을 매번 하지 마세요. 연달아 물으면 캐묻는 느낌이 듭니다. 바로 앞 응답에서 물었다면 이번엔 맞장구나 이야기만 하세요. 대화가 끊길 것 같을 때만 가볍게 하나 물으세요.
+- 이미 들은 내용을 다시 묻지 마세요.
 - 자연스럽고 다정한 반말 섞인 존댓말로, 친구처럼 편하게 이야기하세요.
 
 지켜야 할 것:
 - 오직 한국어로만, 순수 한글로만 대답하세요. 한자(漢字)나 중국어 문자, 일본어 문자를 절대 쓰지 마세요. 예: '名字'(X) → '이름'(O), '딸們'(X) → '딸'(O).
-- 2~3문장 이내로 짧게 말하세요(공감 한 마디 + 질문 한 개 정도).
+- 1~2문장으로 짧게 말하세요.
 - 사실을 지어내지 마세요. 단, [관련 기억]에 있는 내용은 자신 있게 직접 알려주세요.
 - 추상적이거나 철학적인 말은 쓰지 마세요.
 - [환자 표정] 정보가 있으면 분위기에 맞춰 말투를 조절하되, 표정을 직접 언급하지는 마세요.
@@ -254,8 +261,13 @@ def warmup() -> None:
 
 def chat_with_memory(client: Groq, user_text: str, context: str,
                      emotion: dict | None = None, hint: str | None = None,
-                     mark: str | None = None) -> dict:
-    """RAG 컨텍스트 + (있으면) 감정 상태를 system prompt에 합쳐서 Groq 호출."""
+                     mark: str | None = None,
+                     history: list[dict] | None = None) -> dict:
+    """RAG 컨텍스트 + (있으면) 감정 상태를 system prompt에 합쳐서 Groq 호출.
+
+    history 는 이번 대화의 앞선 user/assistant 메시지다. 없으면 매 턴이
+    처음 만난 것처럼 끊긴다.
+    """
     # [관련 기억] 은 가족이 앱에 적어 넣은 글이다. 그 안에 "너는 이제 ~해라"
     # 같은 문장이 있어도 지시로 받아들이면 안 된다. 자료와 지시의 경계를 긋는다.
     full_system = (
@@ -293,6 +305,7 @@ def chat_with_memory(client: Groq, user_text: str, context: str,
         model=GROQ_MODEL,
         messages=[
             {"role": "system", "content": full_system},
+            *(history or []),
             {"role": "user",   "content": user_text},
         ],
         temperature=0.8,
@@ -1260,6 +1273,8 @@ def main() -> None:
     last_reply = ""
     # 이번 대화(웨이크워드~종료)에서 몇 번 주고받았는지. 끝날 때 일과로 남긴다.
     turns_this_session = 0
+    # 이번 대화에서 주고받은 말(LLM messages 형식). 웨이크워드마다 새로 시작한다.
+    history: list[dict] = []
 
     while True:
         try:
@@ -1313,6 +1328,7 @@ def main() -> None:
                     _play_cue("wake")
                 conversation_active = True
                 turns_this_session = 0
+                history = []
                 report_conversation(True)   # 웨이크워드~ = 대화중 시작
 
             recorder = LiveRecorder(
@@ -1404,7 +1420,11 @@ def main() -> None:
             mark = new_mark()   # 이번 턴 기억 표식(datamark.py)
             with timed("RAG", timings):
                 try:
-                    context = build_context_prompt(PATIENT_ID, user_text,
+                    # "응 그랬지" 처럼 짧은 답은 그것만으론 찾을 게 없다.
+                    # 바로 앞에 하신 말까지 붙여 같은 화제의 기억을 찾는다.
+                    rag_query = (f"{history[-2]['content']} {user_text}"
+                                 if history else user_text)
+                    context = build_context_prompt(PATIENT_ID, rag_query,
                                                    top_k=RAG_TOP_K, mark=mark)
                 except Exception as e:
                     print(f"⚠️  RAG 검색 실패(데이터 없음?): {e}")
@@ -1423,6 +1443,7 @@ def main() -> None:
                         groq_client, user_text, context, emotion,
                         hint=(risk.hint if risk else None),
                         mark=mark,
+                        history=history[-HISTORY_TURNS * 2:],
                     )
                 reply, robot_expr = llm_out["reply"], llm_out["expression"]
 
@@ -1445,6 +1466,8 @@ def main() -> None:
 
             # 말이 나가는 걸 늦추지 않도록 따로 보낸다.
             turns_this_session += 1
+            history += [{"role": "user", "content": user_text},
+                        {"role": "assistant", "content": reply}]
             threading.Thread(
                 target=report_utterances, args=(user_text, reply), daemon=True
             ).start()
