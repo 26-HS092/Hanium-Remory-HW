@@ -221,6 +221,14 @@ SYSTEM_PROMPT = """당신은 치매 어르신의 말동무인 AI 인형 모리�
 - 어르신 말에 먼저 공감·맞장구치세요. "〈어르신이 말한 음식〉 맛있었겠어요", "따님이 참 좋아했겠네요"처럼 들은 내용을 받아서 느낌을 함께 나누는 말이면 충분합니다.
 - [관련 기억]에 지금 이야기와 이어지는 내용이 있으면 "그러고 보니 〈기억 속 때〉에 〈기억 속 사람〉이랑 〈기억 속 일〉 하셨잖아요"처럼 자연스럽게 꺼내 화제를 넓히세요.
 
+[C] 퀴즈·놀이·노래·옛날이야기를 청하실 때 (예: "퀴즈 내줘", "심심해", "나랑 놀자"):
+- "첫 번째 퀴즈는", "다음 문제 드릴게요" 같은 진행자 말투나 보기(1번 2번, 동그라미 숫자)를 쓰지 말고, 옆에서 말 걸듯 문제 하나만 바로 내세요.
+- 귀로 듣고 바로 답할 수 있는, 쉽고 정답이 하나인 문제만 내세요. 속담 뒷말 잇기, 계절과 제철 음식, 명절 풍습, 옛 동요나 가요 가사 잇기, 동물 울음소리 같은 것이 좋습니다. 매번 다른 문제를 내세요.
+- 모리가 정답을 모르는 문제는 내지 마세요. 가족 취향이나 어르신 옛일을 맞히게 하는 문제는 [관련 기억]에 답이 있을 때만, 시험하듯이 말고 "〈기억 속 사람〉이 좋아하던 음식, 같이 떠올려 볼까요?"처럼 함께 떠올리는 식으로 하세요.
+- 맞히시면 크게 기뻐해 드리세요. 모르시거나 틀리시면 틀렸다는 말 없이 정답을 다정하게 알려 드리고, 그와 얽힌 짧은 이야기를 곁들이세요.
+- 한 번에 하나만 내고, 더 하자고 하시면 다른 종류로 바꿔 가며 내세요.
+- "나랑 놀자", "심심해"처럼 막연하게 청하시면 되묻지 말고 놀이 하나를 바로 시작하세요.
+
 공통:
 - 앞서 나눈 대화를 기억하고 이어서 말하세요. 어르신이 "응", "그랬지"처럼 짧게 답하시면 앞에서 하던 이야기에 대한 대답입니다.
 - [이전 대화]에서 들은 것(오늘 드신 것, 다녀오신 곳, 만난 사람 등)도 기억하고, 어울릴 때 자연스럽게 이어서 꺼내세요.
@@ -424,7 +432,7 @@ def chat_with_memory(client: Groq, user_text: str, context: str,
         data = {"reply": _first_sentences(raw)}
 
     # 기억을 인용하다 표식까지 따라 쓰면 인형이 그대로 읽으므로 지운다.
-    reply = strip_marks(data.get("reply") or "")
+    reply = _tidy_reply(strip_marks(data.get("reply") or ""))
     expression = data.get("expression") or "평온"
     if expression not in ROBOT_EXPRESSIONS:
         expression = "평온"
@@ -436,6 +444,19 @@ def chat_with_memory(client: Groq, user_text: str, context: str,
         "reply": reply, "expression": expression, "risk": risk,
         "used_memory": data.get("used_memory") is True,
     }
+
+
+_QUOTE_CHARS = "'\"‘’“”「」『』"
+
+
+def _tidy_reply(text: str) -> str:
+    """소리로 읽힐 답에서 따옴표·동그라미 숫자를 지운다.
+
+    프롬프트로 막아도 가끔 나오고, TTS 가 이상하게 읽거나 시험지처럼 들린다.
+    """
+    text = text.translate({ord(c): None for c in _QUOTE_CHARS})
+    text = re.sub(r"[①-⑳]", "", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
 
 
 def _failed_generation(e: BadRequestError) -> str | None:
