@@ -81,6 +81,9 @@ REPLY_ASK_SEC = 20
 REPLY_RESULT_SEC = 3
 # 가족 사진을 화면에 몇 초 동안 보여줄지
 PHOTO_DISPLAY_SEC = 30
+# 사진이 뜬 뒤 '답장하시겠어요?' 를 몇 초 뒤에 여쭐지. 바로 여쭈면 사진을
+# 보실 틈도 없이 버튼이 사진을 덮는다.
+PHOTO_REPLY_DELAY_SEC = 5
 # 어르신 추억(RAG)을 백엔드에서 몇 초마다 동기화할지
 RAG_SYNC_INTERVAL_SEC = 300
 # 스피커 볼륨 조절용 ALSA 컨트롤 이름 (amixer scontrols 로 확인)
@@ -997,6 +1000,9 @@ def chat_worker(face=None) -> None:
                 # 다 읽어드렸으면 답장을 받아 달라고 메인 루프에 부탁한다.
                 # 방해 금지 시간에는 말씀을 청하지 않는다.
                 if not in_dnd(device_settings["dnd"]):
+                    # 사진이 왔으면 먼저 사진을 보실 시간을 드린다.
+                    if face and any(m.get("imageUrl") for m in msgs):
+                        time.sleep(PHOTO_REPLY_DELAY_SEC)
                     reply_requests.put({"sender": _sender_label(msgs[-1])})
                     reply_wake.set()
         except Exception as e:
