@@ -495,8 +495,9 @@ def _play_cue_if_free(name: str) -> None:
         speaker_lock.release()
 
 
-# 다 듣고 답을 만드는 동안 까는 음악. 원음은 효과음·목소리보다 커서 줄여 둔다.
-_loading_music = LoopPlayer(str(ROOT / "bgm" / "Loading.mp3"), volume=0.5)
+# 다 듣고 답을 만드는 동안 까는 음악. 파일을 목소리(-15 LUFS 안팎)보다 낮은
+# -30 LUFS 로 맞춰 두었으니 그대로 튼다. 표정 음악·효과음은 -21 LUFS.
+_loading_music = LoopPlayer(str(ROOT / "bgm" / "Loading.wav"))
 # 로딩 음악이 스피커를 쥐고 있는지. 메인 루프 스레드에서만 만진다.
 _loading_holds_speaker = False
 
