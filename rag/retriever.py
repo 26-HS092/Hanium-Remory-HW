@@ -5,6 +5,7 @@ retriever.py
 사용: LLM 담당 팀원이 이 파일의 retrieve_memories() 함수만 호출하면 됨
 """
 
+import json
 import os
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -16,6 +17,11 @@ EMBEDDING_MODEL = "jhgan/ko-sroberta-multitask"
 # 이보다 유사도가 낮은 기억은 버린다. 상관없는 추억이 대화에 끼어들지 않게.
 # 실제 로그의 "유사도: 0.xx" 를 보며 .env 의 RAG_MIN_SIMILARITY 로 조정한다.
 MIN_SIMILARITY  = float(os.getenv("RAG_MIN_SIMILARITY", "0.4"))
+# 대화에 맞춰 사진을 화면에 띄울 때의 기준. 엉뚱한 사진이 뜨는 것보다 안 뜨는 게
+# 나으므로 대화 참고(MIN_SIMILARITY)보다 높게 둔다. .env 의 RAG_PHOTO_MIN_SIMILARITY 로 조정.
+PHOTO_MIN_SIMILARITY = float(os.getenv("RAG_PHOTO_MIN_SIMILARITY", "0.6"))
+# rag_sync.py 가 동기화 때마다 새로 쓰는 {chroma_id: 최신 S3 주소}
+PHOTO_URL_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "photo_urls.json")
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -185,6 +191,34 @@ def retrieve_high_importance(patient_id: str, query: str,
         })
 
     return memories
+
+
+def find_related_photo(patient_id: str, query: str) -> dict | None:
+    """대화와 관련도가 높은 사진 기억 하나를 화면에 띄울 주소와 함께 돌려준다.
+
+    가장 가까운 사진이 PHOTO_MIN_SIMILARITY 에 못 미치거나, 주소가 없으면 None.
+
+    Example:
+        photo = find_related_photo("P001", "수진이 일요일마다 오잖아요")
+        if photo:
+            face.show_photo(photo["url"])
+    """
+    photos = retrieve_by_category(patient_id, query, "photo", top_k=1)
+    if not photos:
+        return None
+    best = photos[0]
+    if best["similarity"] < PHOTO_MIN_SIMILARITY:
+        print(f"🖼️  사진 제외(유사도 {best['similarity']:.2f} < {PHOTO_MIN_SIMILARITY}): "
+              f"{best['content'][:30]}")
+        return None
+    try:
+        with open(PHOTO_URL_FILE, encoding="utf-8") as f:
+            url = json.load(f).get(best["memory_id"])
+    except (OSError, ValueError):
+        url = None
+    if not url:
+        return None
+    return {**best, "url": url}
 
 
 def build_context_prompt(patient_id: str, query: str, top_k: int = 3,
