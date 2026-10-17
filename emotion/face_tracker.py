@@ -159,10 +159,11 @@ def _is_pixy_camera(camera):
     return type(camera).__name__ == "PixyCamera"
 
 
-def create_hailo_tracker():
+def create_hailo_tracker(paused=False):
     """Hailo 포즈 모델 + 아두이노 팬틸트 트래커. 못 열면 None.
 
     카메라는 이 트래커가 연다. 감정 인식에는 tracker.shared_camera 를 넘긴다.
+    paused 면 켜자마자 쉰다(사람이 없을 때). resume() 으로 다시 찾는다.
     """
     if not config.TRACK_ENABLED or config.TRACK_BACKEND != "hailo":
         return None
@@ -177,6 +178,8 @@ def create_hailo_tracker():
             save_image=False,
             verbose=False,
         )
+        if paused:
+            tracker.pause()
         tracker.start()
         print("🎯 얼굴 트래킹 활성화 (Hailo 포즈 + 아두이노 팬틸트)")
         if config.TRACK_STREAM_PORT:
