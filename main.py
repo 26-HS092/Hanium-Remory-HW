@@ -102,7 +102,7 @@ reply_wake = threading.Event()
 MIC_DEVICE_INDEX = None
 
 WAKEWORD_DEVICE_INDEX = None
-WAKEWORD_THRESHOLD = 0.9
+WAKEWORD_THRESHOLD = 0.8
 
 CONVERSATION_IDLE_TIMEOUT_SEC = 15
 
@@ -1148,7 +1148,7 @@ def main() -> None:
     conv_session_id: str | None = None
 
     wakeword_detector = MoriyaWakeWordDetector(
-        moriya_model_path=ROOT / "models" / "moriya_v1.onnx",
+        moriya_model_path=ROOT / "models" / "moriya_v5.onnx",
         models_dir=ROOT / "models",
         threshold=WAKEWORD_THRESHOLD,
         input_device_index=WAKEWORD_DEVICE_INDEX,
