@@ -284,28 +284,31 @@ def make_chime_wav(path: str, notes, decay: float = 0.16,
 
 
 def synthesize_and_play_stream(text, url, key, sample_rate=24000, buffer_bytes=96000,
-                               on_start=None, spk_id=None):
+                               on_start=None, spk_id=None, stop_event=None):
     """PCM을 백그라운드 스레드로 미리 받아 쌓아두고 재생. 네트워크 흔들림을 흡수한다.
 
     spk_id: 어떤 화자(목소리)로 합성할지. None 이면 서버 기본 목소리(caregiver).
             기본 목소리로 등록한 가족 음성의 speaker_id 를 넘기면 그 목소리로 말한다.
+    stop_event: 켜지면 재생을 그 자리에서 멈춘다(더 급한 알림이 끼어들 때).
     """
     def open_stream():
         return requests.post(url, headers={"x-api-key": key},
                              json={"text": text, "spk_id": spk_id},
                              stream=True, timeout=60)
 
-    return _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, "TTS")
+    return _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, "TTS",
+                            stop_event)
 
 
 def synthesize_and_play_fish(text, key, reference_id=None, model=None,
                              sample_rate=24000, buffer_bytes=24000,
-                             latency="balanced", on_start=None):
+                             latency="balanced", on_start=None, stop_event=None):
     """Fish Audio 클라우드 TTS(https://api.fish.audio/v1/tts)로 스트리밍 재생.
 
     reference_id: Fish Audio 에서 고른/만든 목소리 모델 ID. None 이면 Fish 기본 목소리.
     model       : 요청 헤더 'model'(예: "s1", "s2.1-pro"). None 이면 Fish 기본 모델.
     latency     : "low" | "balanced" | "normal". 낮을수록 첫소리가 빠르고 품질은 조금 떨어진다.
+    stop_event  : 켜지면 재생을 그 자리에서 멈춘다(더 급한 알림이 끼어들 때).
     PCM(16bit mono)으로 받아서 CosyVoice 와 같은 aplay 파이프로 재생한다.
     """
     headers = {"Authorization": f"Bearer {key}"}
@@ -319,11 +322,17 @@ def synthesize_and_play_fish(text, key, reference_id=None, model=None,
         return requests.post("https://api.fish.audio/v1/tts", headers=headers,
                              json=body, stream=True, timeout=60)
 
-    return _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, "TTS(Fish)")
+    return _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, "TTS(Fish)",
+                            stop_event)
 
 
-def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label):
-    """open_stream() 이 돌려준 PCM 스트리밍 응답을 백그라운드로 받으며 aplay 로 재생."""
+def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
+                     stop_event=None):
+    """open_stream() 이 돌려준 PCM 스트리밍 응답을 백그라운드로 받으며 aplay 로 재생.
+
+    stop_event 가 켜지면 aplay 를 죽여 바로 조용해지고 {"interrupted": True} 를
+    돌려준다. 받던 스트림은 내버려 둔다(데몬 스레드라 혼자 끝난다).
+    """
     t0 = time.perf_counter()
     q = queue.Queue()
     box = {"ttfb": None, "dl_done": None, "err": None, "bytes": 0}
@@ -353,13 +362,26 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label):
         stdin=subprocess.PIPE
     )
 
+    def stopped():
+        return stop_event is not None and stop_event.is_set()
+
     buf = b""
     started = False
     t_first = None
+    interrupted = False
     while True:
-        chunk = q.get()
+        # 기다리는 동안에도 멈추라는 신호를 볼 수 있게 짧게 끊어 받는다.
+        try:
+            chunk = q.get(timeout=0.1)
+        except queue.Empty:
+            chunk = b""
+        if stopped():
+            interrupted = True
+            break
         if chunk is None:
             break
+        if not chunk:
+            continue
         if not started:
             buf += chunk
             if len(buf) >= buffer_bytes:
@@ -372,14 +394,31 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label):
         else:
             proc.stdin.write(chunk)
 
-    if not started and buf:
-        proc.stdin.write(buf)
-        t_first = time.perf_counter()
-        if on_start:
-            on_start()
+    if not interrupted:
+        if not started and buf:
+            proc.stdin.write(buf)
+            t_first = time.perf_counter()
+            if on_start:
+                on_start()
+        proc.stdin.close()
+        # 다 받아도 aplay 는 쌓인 소리를 몇 초 더 낸다. 그동안에도 멈출 수 있게 한다.
+        if stop_event is None:
+            proc.wait()
+        else:
+            while proc.poll() is None:
+                if stop_event.wait(0.05):
+                    interrupted = True
+                    break
 
-    proc.stdin.close()
-    proc.wait()
+    if interrupted:
+        proc.kill()
+        proc.wait()
+        try:
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        print(f"   ⏹  {label} 재생 중단 — 더 급한 알림이 끼어듦")
+        return {"interrupted": True}
     t_end = time.perf_counter()
 
     if box["err"]:
