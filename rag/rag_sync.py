@@ -26,6 +26,10 @@ PHOTO_DIR     = RAG_DIR / "photos"
 CHROMA_DIR    = RAG_DIR / "chroma_db"
 CACHE_FILE    = RAG_DIR / "rag_sync_cache.json"      # 사진 비전분석 캐시
 MANIFEST_FILE = RAG_DIR / "rag_manifest.json"        # {chroma_id: 내용해시}
+# {chroma_id: 최신 S3 주소}. 대화 중 관련 사진을 화면에 띄울 때 쓴다(retriever.py).
+# 주소는 만료되므로 chroma 메타데이터(글이 바뀔 때만 다시 씀)가 아니라 여기에
+# 동기화 때마다 새로 쓴다.
+PHOTO_URL_FILE = RAG_DIR / "photo_urls.json"
 
 
 def _load_json(path: Path) -> dict:
@@ -152,6 +156,9 @@ def sync_rag(patient_id: str, api_base: str, device_id, device_token: str,
     patient_name = user.get("name") or "어르신"
     family = data.get("family") or []
     memories = data.get("memories") or []
+    _save_json(PHOTO_URL_FILE, {
+        f"photo_{m.get('memoryId')}": m["imageUrl"] for m in memories if m.get("imageUrl")
+    })
 
     cache = _load_json(CACHE_FILE)
 
