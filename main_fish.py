@@ -1,11 +1,11 @@
 """
 main_fish.py
 ------------
-Fish Audio TTS 테스트용 실행 파일. main.py 와 같은 파이프라인을 TTS 만 Fish 로 바꿔 돌린다.
+예전 실행 파일. 이제 main.py 가 Fish Audio 로 말하는 게 기본이라 main.py 와 같다.
 
-    python main_fish.py
+    python main.py        # 또는 python main_fish.py
 
-.env 에 FISH_API_KEY 만 있으면 된다. 기존 main.py 는 그대로 CosyVoice 로 동작한다.
+CosyVoice 로 돌리려면 .env 에 TTS_ENGINE=cosyvoice 를 넣는다.
 """
 
 import os
