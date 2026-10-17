@@ -60,15 +60,48 @@ class ConversationLogger:
             path.parent.mkdir(parents=True, exist_ok=True)
             with self._lock:
                 with path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    # 감정 신뢰도가 numpy 실수로 올 수 있어 default 로 풀어 준다.
+                    f.write(json.dumps(record, ensure_ascii=False, default=_jsonable) + "\n")
                     f.flush()
         except Exception as e:
             print(f"⚠️  대화 저장 실패: {e}")
             return None
         return record
 
+    def recent_turns(self, days: int = 2, limit: int = 30) -> list[dict]:
+        """최근 days 일(오늘 포함) 동안 남긴 턴을 오래된 것부터 최대 limit 개 돌려준다.
+
+        앞선 대화에서 하신 말("오늘 짜장면 먹었어")을 다음 대화에서도 기억하려고
+        쓴다. 못 읽은 파일·줄은 건너뛴다 — 기억이 좀 빠져도 대화는 해야 한다.
+        """
+        today = datetime.date.today()
+        turns: list[dict] = []
+        for back in range(days - 1, -1, -1):
+            path = self._path_for(today - datetime.timedelta(days=back))
+            try:
+                with self._lock:
+                    lines = path.read_text(encoding="utf-8").splitlines()
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                print(f"⚠️  이전 대화 읽기 실패: {e}")
+                continue
+            for line in lines:
+                try:
+                    turns.append(json.loads(line))
+                except ValueError:
+                    continue   # 쓰다 끊긴 줄
+        return turns[-limit:]
+
     def _path_for(self, date: datetime.date) -> Path:
         return self.base_dir / self.patient_id / f"{date.isoformat()}.jsonl"
+
+
+def _jsonable(obj):
+    """json 이 모르는 값(numpy 스칼라 등)을 기본 타입으로 바꾼다."""
+    if hasattr(obj, "item"):
+        return obj.item()
+    return str(obj)
 
 
 if __name__ == "__main__":
