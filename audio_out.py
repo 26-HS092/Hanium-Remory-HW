@@ -94,12 +94,30 @@ def _mp3_cmd(path: str, volume: float) -> list[str] | None:
     return None
 
 
+def _wav_cmd(path: str) -> list[str] | None:
+    """wav 를 한 번 재생하는 명령(aplay). 쓸 수 있는 재생기가 없으면 None."""
+    if platform.system() == "Linux" and shutil.which("aplay"):
+        cmd = ["aplay", "-q"]
+        if SPEAKER_ALSA_DEVICE:
+            cmd.extend(["-D", SPEAKER_ALSA_DEVICE])
+        return cmd + [path]
+    if platform.system() == "Darwin":
+        return ["afplay", path]
+    return None
+
+
 class LoopPlayer:
-    """mp3 를 멈출 때까지 되풀이해 튼다. 생각하는 동안 까는 음악에 쓴다.
+    """wav(또는 mp3)를 멈출 때까지 되풀이해 튼다. 생각하는 동안 까는 음악에 쓴다.
+
+    wav 는 aplay 로 튼다. mpg123 은 여는 순간 스피커가 바쁘면 장치가 풀린 뒤에도
+    소리 없이 멈춰 버리는데, aplay 는 바로 실패해서 잠깐 뒤 다시 열 수 있다.
+    wav 는 volume 을 따르지 않는다 — 파일 음량을 맞춰 두고 쓴다.
 
     stop() 은 재생기가 완전히 꺼질 때까지 기다린다. 스피커(ALSA hw 장치)는
     한 번에 하나만 열 수 있어서, 덜 꺼진 채로 TTS 가 aplay 를 열면 부딪친다.
     """
+
+    RETRY_SEC = 0.2      # 스피커가 바쁠 때 다시 열어 보는 간격
 
     def __init__(self, path: str, volume: float = 1.0):
         self._path = str(path)
@@ -113,7 +131,10 @@ class LoopPlayer:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        cmd = _mp3_cmd(self._path, self._volume)
+        if self._path.lower().endswith(".wav"):
+            cmd = _wav_cmd(self._path)
+        else:
+            cmd = _mp3_cmd(self._path, self._volume)
         if not cmd or not Path(self._path).exists():
             return
         self._stop.clear()
@@ -121,17 +142,27 @@ class LoopPlayer:
         self._thread.start()
 
     def _run(self, cmd: list[str]) -> None:
+        warned = False
         while True:
             with self._lock:
                 if self._stop.is_set():
                     return
                 try:
                     self._proc = subprocess.Popen(
-                        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 except OSError as e:
                     print(f"⚠️  로딩 음악 재생 실패: {e}")
                     return
-            self._proc.wait()
+            _, err = self._proc.communicate()
+            # 멈추라고 해서 꺼진 게 아니면, 스피커가 잠깐 바빴을 수 있으니 다시 연다.
+            # 왜 못 틀었는지는 한 번만 남긴다.
+            if self._proc.returncode != 0 and not self._stop.is_set():
+                if not warned:
+                    msg = (err or b"").decode(errors="replace").strip().splitlines()
+                    print(f"⚠️  로딩 음악 재생 실패, 다시 시도(code {self._proc.returncode}): "
+                          f"{msg[-1] if msg else ''}")
+                    warned = True
+                self._stop.wait(self.RETRY_SEC)
 
     def stop(self) -> None:
         with self._lock:
