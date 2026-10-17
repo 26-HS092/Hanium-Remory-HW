@@ -78,7 +78,7 @@ Flutter 앱으로 어르신 상태를 보고,
 | | 무엇을 하나 | 핵심 |
 |---|---|---|
 | **① 엣지 · 인형 모리** | 📍 **이 저장소** | Raspberry Pi 5 + AI HAT+ · 카메라/마이크/스피커/LCD<br/>웨이크워드 → STT → 얼굴·표정 감정 인식을 **기기 안에서** 처리 |
-| **② AI 처리** | 이해하고 목소리를 만든다 | Groq API(대화 생성) · CosyVoice2 자체 호스팅(TTS·가족 음성 클로닝) |
+| **② AI 처리** | 이해하고 목소리를 만든다 | Groq API(대화 생성) · Fish Audio(TTS·가족 음성 클로닝) |
 | **③ AWS 클라우드** | 가족 앱과 인형을 잇는다 | EC2 위의 FastAPI · 패스키 인증 · PostgreSQL · Vector DB(RAG) · S3 |
 | **보호자 앱** | 가족이 보는 화면 | Flutter (iOS·Android) → HTTPS REST |
 
@@ -155,7 +155,7 @@ Flutter 앱으로 어르신 상태를 보고,
 | **RAG** | Chroma + `jhgan/ko-sroberta-multitask` | 안정 ID 기반 증분 동기화 (사진 수백 장도 빠름) |
 | **비전 분석** | Gemini 2.5 Flash (선택) | 사진 → 기억 텍스트. 꺼두면 보호자 설명을 그대로 사용 |
 | **LLM** | Groq (`openai/gpt-oss-120b`) | JSON 모드로 `reply` + `expression` 동시 생성 |
-| **TTS** | CosyVoice2 스트리밍 (RTX 2080ti 서버) | Tailscale 사설망 경유 · 가족 목소리 화자 지정 |
+| **TTS** | Fish Audio 스트리밍 (`TTS_ENGINE=cosyvoice` 면 CosyVoice2) | 앱에서 고른 Fish 목소리 모델로 말함 |
 | **얼굴 표시** | WebSocket(8765) → Chromium kiosk + SVG | 표정 6종 · 말할 때 입 움직임 · 웨이크워드 전구 · 알림 카드(약·메시지) · 사진 오버레이 |
 | **오디오 출력** | ALSA `aplay` (`plughw:CARD=UACDemoV10`) | 볼륨은 `amixer` 로 서버 설정값 반영 |
 
