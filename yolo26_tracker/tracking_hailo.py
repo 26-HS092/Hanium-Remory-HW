@@ -70,6 +70,7 @@ SCAN_MAX = PAN_MAX
 SCAN_SPEED = 30.0     # 탐색 회전 속도 (도/초)
 CONFIRM_FRAMES = 2    # 연속 몇 프레임 보여야 사람으로 확정할지
 LOST_TIMEOUT = 2.0    # 추적 중 이 시간(초) 동안 안 보이면 다시 탐색
+SCAN_GIVEUP = 10.0    # 이 시간(초) 동안 찾아도 없으면 정면에서 쉰다 (보이면 바로 다시 추적)
 
 # 놓쳤을 때 사라진 쪽으로 돌아보기
 EDGE_MARGIN = 5       # 박스가 화면 끝에서 이 픽셀 안이면 잘린 것으로 봄
@@ -618,6 +619,8 @@ class HailoFaceTracker:
         # "scan": 좌우로 돌며 찾기, "track": 찾은 사람 추적
         self.mode = "scan"
         self.scan_direction = 1
+        self.scan_started = time.monotonic()   # 이번 탐색을 시작한 때 (SCAN_GIVEUP 용)
+        self.scan_resting = False
         # 최근 얼굴이 있던 서보 각도 기록 (시각, pan, tilt): 놓쳤을 때 갈 곳 예측용
         self.face_history = deque()
         self.lost_goal = None      # 놓친 뒤 돌아볼 (pan, tilt)
@@ -633,6 +636,10 @@ class HailoFaceTracker:
         self._snapshot = (None, None)
         self._stop = threading.Event()
         self._thread = None
+        # 꺼져 있으면(pause) 추적을 쉬고 정면에 서 있는다. 사람이 없을 때 쓴다.
+        self._active = threading.Event()
+        self._active.set()
+        self._parked = False
 
     # ── 장치 열기 ─────────────────────────────────────────────
     def open(self):
@@ -699,6 +706,7 @@ class HailoFaceTracker:
         print("종료: Ctrl+C", flush=True)
 
         self.last_loop = time.monotonic()
+        self._start_scan()
 
     def _grab(self):
         """(감정용 원본 화면, 추적용으로 줄인 화면)"""
@@ -758,6 +766,7 @@ class HailoFaceTracker:
                     self.scan_direction = 1 if moved > 0 else -1
             self.face_history.clear()
             self.lost_goal = None
+            self._start_scan()
             print("사람 놓침: 다시 탐색", flush=True)
 
         target_index = None
@@ -877,6 +886,15 @@ class HailoFaceTracker:
                 )
             else:
                 target_status = "대상 안 보임: 각도 유지"
+
+        elif now - self.scan_started > SCAN_GIVEUP:
+            # 한참 찾아도 없으면 정면으로 돌아와 쉰다. 검출은 계속해서 보이면 바로 추적
+            if not self.scan_resting:
+                self.scan_resting = True
+                print("아무도 안 보임: 정면에서 대기", flush=True)
+            self.pan = step_toward(self.pan, float(PAN_CENTER), SCAN_SPEED * dt)
+            self.tilt = float(TILT_CENTER)
+            target_status = "탐색 쉼"
 
         else:
             # 좌우 끝까지 돌고 방향 전환, 틸트는 중앙
@@ -1052,10 +1070,59 @@ class HailoFaceTracker:
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
+    def pause(self):
+        """추적을 쉰다. 정면으로 돌아가 서 있고, 검출도 하지 않는다."""
+        self._active.clear()
+
+    def resume(self):
+        """추적을 다시 한다. 처음부터 사람을 찾는다."""
+        self._active.set()
+
+    @property
+    def paused(self):
+        return not self._active.is_set()
+
+    def has_target(self, within=3.0):
+        """지금(또는 within 초 안에) 따라가는 사람이 있는지."""
+        return (
+            not self.paused
+            and self.mode == "track"
+            and time.monotonic() - self.last_seen <= within
+        )
+
+    def _park(self):
+        """정면으로 돌려 놓고 탐색 상태를 비운다. 추적 스레드에서만 부른다."""
+        self.pan, self.tilt = float(PAN_CENTER), float(TILT_CENTER)
+        send_angles(self.arduino, self.pan, self.tilt)
+        self.mode = "scan"
+        self._start_scan()
+        self.seen_frames = 0
+        self.face_history.clear()
+        self.lost_goal = None
+        self.lock.reset()
+        with self._snapshot_lock:
+            self._snapshot = (None, None)
+        self._parked = True
+        print("추적 쉼: 정면에서 대기", flush=True)
+
+    def _start_scan(self):
+        self.scan_started = time.monotonic()
+        self.scan_resting = False
+
     def _loop(self):
         errors = 0
         while not self._stop.is_set():
             try:
+                if not self._active.is_set():
+                    if not self._parked:
+                        self._park()
+                    self._active.wait(0.5)
+                    continue
+                if self._parked:
+                    self._parked = False
+                    self.last_loop = time.monotonic()   # 쉰 시간만큼 한 번에 돌지 않게
+                    self._start_scan()
+                    print("추적 다시 시작: 사람 찾는 중", flush=True)
                 self.step()
                 errors = 0
             except Exception as error:

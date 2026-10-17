@@ -157,6 +157,25 @@ except Exception as _e:                          # pragma: no cover
     create_tracker = create_hailo_tracker = None
     print(f"⚠️  얼굴 트래킹 모듈 import 실패 → 트래킹 없이 동작: {_e}")
 
+try:
+    from mmwave import create_presence           # noqa: E402
+except Exception as _e:                          # pragma: no cover
+    create_presence = None
+    print(f"⚠️  mmWave 모듈 import 실패 → 늘 사람이 있는 것처럼 동작: {_e}")
+
+# 웨이크워드가 들렸을 때 카메라가 이 시간 안에 사람을 잡고 있었어야 대화를 시작한다.
+WAKE_NEEDS_TARGET_SEC = 3.0
+
+
+class _AnyEvent:
+    """여러 Event 중 하나라도 켜지면 켜진 것으로 본다. 웨이크워드 대기를 끊는 데 쓴다."""
+
+    def __init__(self, *events):
+        self._events = [e for e in events if e is not None]
+
+    def is_set(self) -> bool:
+        return any(e.is_set() for e in self._events)
+
 
 # RAG retriever.py 안에서 "./chroma_db" 상대경로를 쓰므로 CWD를 RAG 폴더로 이동
 os.chdir(ROOT / "rag")
@@ -1135,11 +1154,17 @@ def main() -> None:
         input_device_index=WAKEWORD_DEVICE_INDEX,
     )
 
+    # 📡 mmWave 레이더: 사람이 없으면 팬틸트를 쉬고 웨이크워드도 안 듣는다.
+    presence = create_presence() if create_presence is not None else None
+
     # 🎯 얼굴 트래킹 ①: Hailo 트래커(아두이노 팬틸트)는 Pi 카메라를 직접 열고,
     #    감정 인식이 그 화면과 '따라가는 사람' 얼굴 위치를 같이 쓴다.
+    #    사람이 없으면 쉰 채로 켜고, 사람이 오면 그때 찾기 시작한다.
     tracker = None
     if create_hailo_tracker is not None:
-        tracker = create_hailo_tracker()
+        tracker = create_hailo_tracker(
+            paused=bool(presence and not presence.present)
+        )
 
     emotion_svc = None
     if EmotionService is not None:
@@ -1154,6 +1179,10 @@ def main() -> None:
     # 🎯 얼굴 트래킹 ②: Hailo 트래커가 없으면 Pixy2 팬틸트가 감정 쪽 카메라를 빌려 쓴다.
     if tracker is None and create_tracker is not None:
         tracker = create_tracker(camera=emotion_svc.camera if emotion_svc else None)
+
+    # 사람이 오면 찾기 시작하고, 떠나면 정면에서 쉰다(Hailo 트래커만 쉴 수 있다).
+    if presence and hasattr(tracker, "pause"):
+        presence.on_change(lambda here: tracker.resume() if here else tracker.pause())
 
     groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
@@ -1224,8 +1253,23 @@ def main() -> None:
                 if face:
                     face.set_expression("평온")
 
-                # 답장 요청이 오면 웨이크워드 대기를 끊고 위로 돌아가 받는다.
-                if not wakeword_detector.wait_for_wakeword(stop_event=reply_wake):
+                # 아무도 없으면 웨이크워드를 듣지 않고 사람이 오기를 기다린다.
+                if presence and not presence.present:
+                    print("📡 아무도 없음 — 사람이 올 때까지 대기")
+                    if not presence.wait_present(stop_event=reply_wake):
+                        continue        # 답장 요청이 왔다
+
+                # 답장 요청이 오거나 사람이 떠나면 웨이크워드 대기를 끊고 위로 돌아간다.
+                if not wakeword_detector.wait_for_wakeword(
+                    stop_event=_AnyEvent(reply_wake, presence and presence.away_event)
+                ):
+                    continue
+
+                # 카메라가 잡고 있는 사람이 부른 게 아니면 대화를 시작하지 않는다.
+                if hasattr(tracker, "has_target") and not tracker.has_target(
+                    WAKE_NEEDS_TARGET_SEC
+                ):
+                    print("👀 웨이크워드는 들렸지만 카메라에 잡힌 사람이 없어 넘어감")
                     continue
                 dnd = device_settings["dnd"]
                 if in_dnd(dnd) and not (dnd or {}).get("allowWakeWord", True):
@@ -1425,6 +1469,8 @@ def main() -> None:
     if turns_this_session:
         report_activity("DAILY_CONVERSATION", f"{turns_this_session}번 주고받았어요")
 
+    if presence:
+        presence.close()
     if tracker:
         tracker.close()          # 카메라보다 먼저 멈춰야 닫힌 카메라를 안 부른다
     if emotion_svc:
