@@ -71,6 +71,7 @@ SCAN_SPEED = 30.0     # 탐색 회전 속도 (도/초)
 CONFIRM_FRAMES = 2    # 연속 몇 프레임 보여야 사람으로 확정할지
 LOST_TIMEOUT = 2.0    # 추적 중 이 시간(초) 동안 안 보이면 다시 탐색
 SCAN_GIVEUP = 10.0    # 이 시간(초) 동안 찾아도 없으면 정면에서 쉰다 (보이면 바로 다시 추적)
+SEEK_SPEED = 60.0     # 부르셨는데 아무도 안 잡혀 있을 때 빨리 찾는 속도 (도/초)
 
 # 놓쳤을 때 사라진 쪽으로 돌아보기
 EDGE_MARGIN = 5       # 박스가 화면 끝에서 이 픽셀 안이면 잘린 것으로 봄
@@ -640,6 +641,9 @@ class HailoFaceTracker:
         self._active = threading.Event()
         self._active.set()
         self._parked = False
+        # 켜지면 다음 프레임부터 SEEK_SPEED 로 다시 찾는다 (seek())
+        self._seek = threading.Event()
+        self._seek_until = 0.0
 
     # ── 장치 열기 ─────────────────────────────────────────────
     def open(self):
@@ -730,6 +734,15 @@ class HailoFaceTracker:
         now = time.monotonic()
         dt = now - self.last_loop
         self.last_loop = now
+
+        if self._seek.is_set():
+            self._seek.clear()
+            # 잠깐 놓친 중(track)이면 곧 넘어갈 탐색부터 빠르게 한다
+            self._seek_until = now + SCAN_GIVEUP
+            if self.mode == "scan":
+                # 쉬고 있었어도 처음부터 다시 찾는다
+                self._start_scan()
+                print("부르셔서 빠르게 찾는 중", flush=True)
 
         full, frame = self._grab()
 
@@ -898,7 +911,8 @@ class HailoFaceTracker:
 
         else:
             # 좌우 끝까지 돌고 방향 전환, 틸트는 중앙
-            self.pan += self.scan_direction * SCAN_SPEED * dt
+            speed = SEEK_SPEED if now < self._seek_until else SCAN_SPEED
+            self.pan += self.scan_direction * speed * dt
 
             if self.pan >= SCAN_MAX:
                 self.pan = SCAN_MAX
@@ -1076,6 +1090,11 @@ class HailoFaceTracker:
 
     def resume(self):
         """추적을 다시 한다. 처음부터 사람을 찾는다."""
+        self._active.set()
+
+    def seek(self):
+        """부르셨는데 아무도 안 잡혀 있을 때. 쉬고 있었어도 바로 빠르게 찾는다."""
+        self._seek.set()
         self._active.set()
 
     @property

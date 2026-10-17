@@ -163,7 +163,7 @@ except Exception as _e:                          # pragma: no cover
     create_presence = None
     print(f"⚠️  mmWave 모듈 import 실패 → 늘 사람이 있는 것처럼 동작: {_e}")
 
-# 웨이크워드가 들렸을 때 카메라가 이 시간 안에 사람을 잡고 있었어야 대화를 시작한다.
+# 웨이크워드가 들렸을 때 카메라가 이 시간 안에 사람을 못 잡았으면 빠르게 찾게 한다.
 WAKE_NEEDS_TARGET_SEC = 3.0
 
 
@@ -1265,12 +1265,13 @@ def main() -> None:
                 ):
                     continue
 
-                # 카메라가 잡고 있는 사람이 부른 게 아니면 대화를 시작하지 않는다.
+                # 카메라에 잡힌 사람이 없어도 대화는 시작한다. 대신 바로 빠르게 찾는다.
                 if hasattr(tracker, "has_target") and not tracker.has_target(
                     WAKE_NEEDS_TARGET_SEC
                 ):
-                    print("👀 웨이크워드는 들렸지만 카메라에 잡힌 사람이 없어 넘어감")
-                    continue
+                    print("👀 카메라에 잡힌 사람이 없음 — 대화는 시작하고 빠르게 찾는다")
+                    if hasattr(tracker, "seek"):
+                        tracker.seek()
                 dnd = device_settings["dnd"]
                 if in_dnd(dnd) and not (dnd or {}).get("allowWakeWord", True):
                     print("🔕 방해 금지 시간 — 조용히 대기")
