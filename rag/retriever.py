@@ -13,6 +13,9 @@ from langchain_huggingface import HuggingFaceEmbeddings
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 DB_DIR          = "./chroma_db"
 EMBEDDING_MODEL = "jhgan/ko-sroberta-multitask"
+# 이보다 유사도가 낮은 기억은 버린다. 상관없는 추억이 대화에 끼어들지 않게.
+# 실제 로그의 "유사도: 0.xx" 를 보며 .env 의 RAG_MIN_SIMILARITY 로 조정한다.
+MIN_SIMILARITY  = float(os.getenv("RAG_MIN_SIMILARITY", "0.4"))
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -98,6 +101,10 @@ def retrieve_memories(patient_id: str, query: str, top_k: int = 3) -> list[dict]
     memories = []
     for doc, distance in results:
         similarity = round(max(0.0, 1.0 - distance), 4)   # 코사인: distance=0~2 → similarity=1~-1, max(0)로 클리핑
+        if similarity < MIN_SIMILARITY:
+            print(f"🧠 기억 제외(유사도 {similarity:.2f} < {MIN_SIMILARITY}): "
+                  f"{doc.page_content[:30]}")
+            continue
         memories.append({
             "content"        : doc.page_content,
             "category"       : doc.metadata.get("category", ""),
