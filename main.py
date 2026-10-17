@@ -84,6 +84,9 @@ PHOTO_DISPLAY_SEC = 30
 # 사진이 뜬 뒤 '답장하시겠어요?' 를 몇 초 뒤에 여쭐지. 바로 여쭈면 사진을
 # 보실 틈도 없이 버튼이 사진을 덮는다.
 PHOTO_REPLY_DELAY_SEC = 5
+# 대화 중 꺼낸 기억의 사진은 모리가 답하는 동안만 띄운다. 말이 끝나면 내리고,
+# 혹시 못 내리더라도 이만큼 뒤엔 내려간다.
+MEMORY_PHOTO_MAX_SEC = 15
 # 어르신 추억(RAG)을 백엔드에서 몇 초마다 동기화할지
 RAG_SYNC_INTERVAL_SEC = 300
 # 스피커 볼륨 조절용 ALSA 컨트롤 이름 (amixer scontrols 로 확인)
@@ -134,7 +137,7 @@ if STT_ENGINE == "clova":
     from stt_clova import ClovaSTTHandler as STTHandler   # noqa: E402
 else:
     from stt4vad_hat import STTHandler              # noqa: E402
-from retriever import build_context_prompt  # noqa: E402
+from retriever import build_context_prompt, find_related_photo  # noqa: E402
 from datamark import new_mark, strip_marks, instruction as datamark_instruction  # noqa: E402
 from conversation_log import ConversationLogger  # noqa: E402
 
@@ -299,10 +302,13 @@ def chat_with_memory(client: Groq, user_text: str, context: str,
         "- medical    : 약을 더/덜 먹어도 되는지, 병원에 안 가도 되는지 등의 판단 요청\n"
         "- abuse      : 누가 때리거나 밥을 안 주는 등 험한 일을 당했다는 이야기\n"
         "'힘들어 죽겠다', '맛이 죽여준다' 같은 관용적인 강조는 none 입니다.\n"
+        "\n[기억 사용] reply 에 [관련 기억] 의 내용을 실제로 꺼내 말했으면 "
+        "used_memory 를 true, 아니면 false 로 하세요.\n"
         "\n[출력 형식] 반드시 아래 JSON 형식으로만 답하세요. 다른 설명 없이 JSON만 출력합니다.\n"
         '{"reply": "어르신께 할 말", '
         '"expression": "기쁨|슬픔|위로|경청|놀람|평온 중 하나", '
-        '"risk": "none|self_harm|harm_others|medical|abuse"}'
+        '"risk": "none|self_harm|harm_others|medical|abuse", '
+        '"used_memory": true|false}'
     )
     resp = client.chat.completions.create(
         model=GROQ_MODEL,
@@ -332,7 +338,10 @@ def chat_with_memory(client: Groq, user_text: str, context: str,
     risk = data.get("risk")
     if risk not in safety.LLM_KINDS:
         risk = None
-    return {"reply": reply, "expression": expression, "risk": risk}
+    return {
+        "reply": reply, "expression": expression, "risk": risk,
+        "used_memory": data.get("used_memory") is True,
+    }
 
 
 def speak(text: str) -> None:
@@ -710,13 +719,20 @@ def _expire_photo(face, seq: int) -> None:
     with _photo_timer_lock:
         if seq != _photo_seq:
             return
+        # 말이 끝나 타이머보다 먼저 내릴 때를 위해 끈다. 타이머가 부른 거면 아무 일 없다.
+        if _photo_timer is not None:
+            _photo_timer.cancel()
         _photo_timer = None
         _photo_url = None
     face.hide_photo()
 
 
-def _show_photo_for_a_while(face, url: str) -> None:
-    """가족 사진을 띄우고 PHOTO_DISPLAY_SEC 뒤에 내려 모리 얼굴로 돌아온다."""
+def _show_photo_for_a_while(face, url: str, seconds: float = PHOTO_DISPLAY_SEC) -> int:
+    """사진을 띄우고 seconds 뒤에 내려 모리 얼굴로 돌아온다.
+
+    이 사진의 번호를 돌려준다. _expire_photo 에 넘기면 그 사이 다른 사진이
+    올라오지 않았을 때만 내린다.
+    """
     global _photo_timer, _photo_seq, _photo_url
     with _photo_timer_lock:
         if _photo_timer is not None:
@@ -725,9 +741,10 @@ def _show_photo_for_a_while(face, url: str) -> None:
         seq = _photo_seq
         _photo_url = url
         face.show_photo(url)
-        _photo_timer = threading.Timer(PHOTO_DISPLAY_SEC, _expire_photo, args=(face, seq))
+        _photo_timer = threading.Timer(seconds, _expire_photo, args=(face, seq))
         _photo_timer.daemon = True
         _photo_timer.start()
+    return seq
 
 
 def _hide_photo_now(face) -> None:
@@ -757,6 +774,47 @@ def _restore_photo_if_any(face) -> None:
         url = _photo_url
     if url:
         _show_photo_for_a_while(face, url)
+
+
+class _MemoryPhoto:
+    """이번 답에 곁들일 기억 사진. 모리가 답하는 동안만 띄운다.
+
+    사진 찾기(임베딩 검색)는 말을 늦추지 않게 따로 돈다. 그래서 말이 끝난
+    뒤에야 찾을 수도 있는데, 그때는 띄우지 않는다.
+    """
+
+    def __init__(self, face):
+        self.face = face
+        self._lock = threading.Lock()
+        self._seq: int | None = None
+        self._done = False
+
+    def find_and_show(self, query: str) -> None:
+        """관련도가 높은 사진이 있으면 띄운다. 못 찾으면 아무것도 안 띄운다."""
+        try:
+            photo = find_related_photo(PATIENT_ID, query)
+        except Exception as e:
+            print(f"⚠️  관련 사진 찾기 실패: {e}")
+            return
+        if not photo:
+            return
+        with self._lock:
+            if self._done:
+                print("🖼️  관련 사진을 찾았지만 답이 이미 끝나 띄우지 않음")
+                return
+            print(f"🖼️  관련 사진 표시(유사도 {photo['similarity']:.2f}): "
+                  f"{photo['content'][:30]}")
+            self._seq = _show_photo_for_a_while(
+                self.face, photo["url"], MEMORY_PHOTO_MAX_SEC
+            )
+
+    def finish(self) -> None:
+        """답이 끝났다. 띄운 사진이 아직 그대로면 내린다(그 사이 온 가족 사진은 둔다)."""
+        with self._lock:
+            self._done = True
+            seq = self._seq
+        if seq is not None:
+            _expire_photo(self.face, seq)
 
 
 def _sender_label(m: dict) -> str:
@@ -1440,6 +1498,7 @@ def main() -> None:
             #    없는 순간이고, 그보다 급한 판정은 없어서 LLM 에 물을 것도 없다.
             #    나머지는 규칙이 잡았더라도 LLM 을 불러 더 급한 신호가 있는지 본다
             #    ("씨발 그냥 자다가 안 깨어났으면" 은 규칙상 거친 말일 뿐이다).
+            used_memory = False
             if risk and risk.kind == safety.SELF_HARM:
                 reply, robot_expr = risk.reply, risk.expression
                 timings["LLM"] = 0.0
@@ -1452,6 +1511,7 @@ def main() -> None:
                         history=history[-HISTORY_TURNS * 2:],
                     )
                 reply, robot_expr = llm_out["reply"], llm_out["expression"]
+                used_memory = llm_out["used_memory"]
 
                 # 규칙이 놓쳤거나 약하게 본 것을 LLM 이 더 급하게 봤으면 올린다.
                 upgraded = safety.escalate(risk, llm_out.get("risk"), user_text)
@@ -1469,6 +1529,17 @@ def main() -> None:
                 if risk and risk.reply:
                     reply, robot_expr = risk.reply, risk.expression
             print(f"🐻 모리: {reply}    [표정: {robot_expr}]")
+
+            # 저장된 기억을 꺼내 말했으면 그와 관련된 사진을 답하는 동안 보여드린다.
+            # 안전 신호가 걸린 턴엔 띄우지 않는다.
+            memory_photo = None
+            if (face and used_memory and not risk
+                    and context.startswith("[관련 기억]")):
+                memory_photo = _MemoryPhoto(face)
+                threading.Thread(
+                    target=memory_photo.find_and_show, args=(f"{user_text} {reply}",),
+                    daemon=True,
+                ).start()
 
             # 말이 나가는 걸 늦추지 않도록 따로 보낸다.
             turns_this_session += 1
@@ -1504,6 +1575,8 @@ def main() -> None:
             finally:
                 if face:
                     face.stop_speaking()
+                if memory_photo:
+                    memory_photo.finish()
 
             if face:
                 face.set_expression("평온")
