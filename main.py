@@ -20,6 +20,7 @@ import errno
 import hashlib
 import os
 import queue
+import re
 import requests
 import threading
 import datetime
@@ -42,12 +43,14 @@ PATIENT_ID    = "P001"                       # RAG/chroma_db/ 안에 폴더로 �
 
 GROQ_MODEL    = "openai/gpt-oss-120b"
 # CosyVoice2 TTS 서버(2080). URL/키는 .env로 주입 
-# TTS 엔진 선택: cosyvoice(자체 서버) | fish(Fish Audio 클라우드)
-TTS_ENGINE    = os.getenv("TTS_ENGINE", "cosyvoice").lower()
+# TTS 엔진 선택: fish(Fish Audio 클라우드, 기본) | cosyvoice(자체 서버)
+TTS_ENGINE    = os.getenv("TTS_ENGINE", "fish").lower()
 if TTS_ENGINE == "fish":
     FISH_API_KEY      = os.environ["FISH_API_KEY"]
-    FISH_REFERENCE_ID = os.getenv("FISH_REFERENCE_ID")   # 없으면 Fish 기본 목소리
-    FISH_MODEL        = os.getenv("FISH_MODEL")          # 없으면 Fish 기본 모델
+    # 앱에서 Fish 목소리를 고르지 않았을 때 쓸 목소리(모델 ID).
+    FISH_REFERENCE_ID = os.getenv("FISH_REFERENCE_ID", "c2045f5c866b4222a4a2c30b5b051f7e")
+    # 합성 엔진. 안 정하면 유료 기본 모델(s2.1-pro)로 가서 크레딧이 없으면 402 가 난다.
+    FISH_MODEL        = os.getenv("FISH_MODEL", "s2.1-pro-free")
     FISH_LATENCY      = os.getenv("FISH_LATENCY", "balanced")
 else:
     TTS_STREAM_API_URL = os.environ["TTS_STREAM_API_URL"]
@@ -345,9 +348,9 @@ def chat_with_memory(client: Groq, user_text: str, context: str,
 
 
 def speak(text: str) -> None:
-    """CosyVoice2 스트리밍 TTS(8001)로 문장을 말한다. 약알림·채팅 안내 공용.
+    """스트리밍 TTS 로 문장을 말한다. 약알림·채팅 안내 공용.
 
-    기본 목소리로 지정된 화자(device_settings["spk_id"])로 말한다. None 이면 서버 기본.
+    앱에서 기본으로 고른 목소리(device_settings["spk_id"])로 말한다(tts_play).
     """
     tts_play(text)
 
@@ -369,11 +372,24 @@ def _close_mic_tap(tap: MicTap | None) -> None:
             print(f"⚠️  말끝 겹쳐 듣기 마이크 닫기 실패: {e}")
 
 
+def _fish_reference_id() -> str | None:
+    """Fish 로 말할 목소리 모델 ID.
+
+    앱에서 기본 목소리로 고른 가족 목소리가 Fish 에 등록된 것이면 그 목소리로,
+    아니면 FISH_REFERENCE_ID 로 말한다. 서버는 목소리를 Fish 모델로 등록하고 그
+    모델 ID(32자리 16진수)를 speakerId 로 준다. 예전에 CosyVoice 로 등록한
+    목소리(spk_12 꼴)는 Fish 에 없어서, 넘기면 Fish 가 거절해 인형이 말을 못 한다.
+    """
+    spk = device_settings.get("spk_id")
+    if spk and re.fullmatch(r"[0-9a-f]{32}", spk):
+        return spk
+    return FISH_REFERENCE_ID
+
+
 def tts_play(text: str, on_start=None) -> None:
     """TTS_ENGINE 에 맞는 엔진으로 text 를 합성하며 바로 재생한다."""
     if TTS_ENGINE == "fish":
-        # 가족 목소리(spk_id)는 CosyVoice 서버에만 등록돼 있어 Fish 에선 쓰지 않는다.
-        synthesize_and_play_fish(text, FISH_API_KEY, reference_id=FISH_REFERENCE_ID,
+        synthesize_and_play_fish(text, FISH_API_KEY, reference_id=_fish_reference_id(),
                                  model=FISH_MODEL, latency=FISH_LATENCY,
                                  on_start=on_start)
     else:
