@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1340" height="760" viewBox="0 0 1340 760" font-family="Noto Sans CJK KR, Pretendard, sans-serif"><defs><marker id="arr" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10" fill="none" stroke="#cbbdb6" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></marker></defs><rect width="100%" height="100%" fill="#ffffff"/><text x="56" y="66" font-size="22" font-weight="800" fill="#8c7064" text-anchor="start">01 대기 및 감지</text>
+<text x="640" y="66" font-size="22" font-weight="800" fill="#8c7064" text-anchor="start">02 듣기 · 인식</text>
+<rect x="40" y="150" width="188" height="100" rx="16" fill="#fdf4f0" stroke="#ecc8b9" stroke-width="2"/>
+<circle cx="80" cy="200.0" r="22" fill="#e98d70"/>
+<circle cx="80" cy="200.0" r="9" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round"/><path d="M80,185.0 v6 M80,209.0 v6 M65,200.0 h6 M89,200.0 h6" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round"/>
+<text x="112" y="197.0" font-size="16.5" font-weight="700" fill="#2e2a28" text-anchor="start">Idle 상태</text>
+<text x="112" y="218.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="start">사람·웨이크워드 대기</text>
+<path d="M228,200 L262,200" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<path d="M340,124 L418,200 L340,276 L262,200 Z" fill="#fdf9e9" stroke="#e4d184" stroke-width="2" stroke-linejoin="round"/>
+<text x="340" y="184" font-size="16" font-weight="700" fill="#2e2a28" text-anchor="middle">사람</text>
+<text x="340" y="204" font-size="16" font-weight="700" fill="#2e2a28" text-anchor="middle">감지</text>
+<text x="340" y="226" font-size="11.5" font-weight="400" fill="#7d726d" text-anchor="middle">mmWave 레이더</text>
+<rect x="267.0" y="283" width="146" height="20" rx="10" fill="#fff"/>
+<text x="340" y="298" font-size="12" font-weight="700" fill="#a8978f" text-anchor="middle">없음 → 대기 유지</text>
+<path d="M418,200 L446,200" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<rect x="450" y="134" width="168" height="38" rx="19" fill="#fcefee" stroke="#f0cdc8" stroke-width="1.6"/>
+<circle cx="472" cy="153" r="5" fill="#e98d70"/>
+<text x="486" y="158" font-size="13" font-weight="600" fill="#2e2a28" text-anchor="start">팬틸트 얼굴 추적</text>
+<rect x="450" y="180" width="168" height="38" rx="19" fill="#fcefee" stroke="#f0cdc8" stroke-width="1.6"/>
+<circle cx="472" cy="199" r="5" fill="#e98d70"/>
+<text x="486" y="204" font-size="13" font-weight="600" fill="#2e2a28" text-anchor="start">&quot;모리야&quot; 호출</text>
+<rect x="450" y="226" width="168" height="38" rx="19" fill="#fcefee" stroke="#f0cdc8" stroke-width="1.6"/>
+<circle cx="472" cy="245" r="5" fill="#e98d70"/>
+<text x="486" y="250" font-size="13" font-weight="600" fill="#2e2a28" text-anchor="start">&#x27;띵&#x27; + 경청 표정</text>
+<path d="M618,200 L646,200" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<rect x="650" y="150" width="180" height="100" rx="16" fill="#f6f9fe" stroke="#bccbe8" stroke-width="2"/>
+<circle cx="690" cy="200.0" r="22" fill="#8ba6d8"/>
+<rect x="685" y="187.0" width="10" height="17" rx="5" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round"/><path d="M680,198.0 a10,10 0 0 0 20,0 M690,208.0 v6" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round"/>
+<text x="722" y="197.0" font-size="16.5" font-weight="700" fill="#2e2a28" text-anchor="start">녹음 + VAD</text>
+<text x="722" y="218.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="start">말끝 침묵 2초면 종료</text>
+<path d="M830,200 L840.0,200.0 Q850,200 850.0,186.0 L850.0,126.0 Q850,112 859.0,112.0 L868,112" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<path d="M830,200 L840.0,200.0 Q850,200 850.0,214.0 L850.0,276.0 Q850,290 859.0,290.0 L868,290" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<rect x="872" y="74" width="196" height="76" rx="16" fill="#f2f7fe" stroke="#c3d4ee" stroke-width="2"/>
+<text x="970.0" y="109.0" font-size="16.5" font-weight="700" fill="#2e2a28" text-anchor="middle">표정 감정 분석</text>
+<text x="970.0" y="130.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="middle">YuNet 얼굴 검출 · 0.7초 샘플</text>
+<rect x="872" y="252" width="196" height="76" rx="16" fill="#f3faf3" stroke="#bddcc0" stroke-width="2"/>
+<text x="970.0" y="287.0" font-size="16.5" font-weight="700" fill="#2e2a28" text-anchor="middle">STT 변환</text>
+<text x="970.0" y="308.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="middle">Whisper · Hailo 가속</text>
+<path d="M1068,112 L1094,112" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<path d="M1068,290 L1094,290" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<rect x="1098" y="74" width="196" height="76" rx="16" fill="#f2f7fe" stroke="#c3d4ee" stroke-width="2"/>
+<text x="1196.0" y="109.0" font-size="16.5" font-weight="700" fill="#2e2a28" text-anchor="middle">감정 결과</text>
+<text x="1196.0" y="130.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="middle">신뢰도 가중 다수결 · 원본 폐기</text>
+<rect x="1098" y="252" width="196" height="76" rx="16" fill="#f3faf3" stroke="#bddcc0" stroke-width="2"/>
+<text x="1196.0" y="287.0" font-size="16.5" font-weight="700" fill="#2e2a28" text-anchor="middle">안전 판별</text>
+<text x="1196.0" y="308.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="middle">규칙 기반 · safety.py</text>
+<path d="M1294,112 L1306.0,112.0 Q1318,112 1318.0,126.0 L1318,386" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round"/>
+<path d="M1294,290 L1318,290" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round"/>
+<path d="M1318,376 L1318.0,381.0 Q1318,386 1304.0,386.0 L132.0,386.0 Q118,386 118.0,395.0 L118,404" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<path d="M118,408 L194,480 L118,552 L42,480 Z" fill="#fdf0f1" stroke="#eab0b8" stroke-width="2" stroke-linejoin="round"/>
+<text x="118" y="464" font-size="16" font-weight="700" fill="#2e2a28" text-anchor="middle">자해</text>
+<text x="118" y="484" font-size="16" font-weight="700" fill="#2e2a28" text-anchor="middle">신호?</text>
+<text x="118" y="506" font-size="11.5" font-weight="400" fill="#7d726d" text-anchor="middle">규칙 + LLM 2중</text>
+<path d="M194,480 L226,480" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<rect x="182.5" y="453" width="55" height="20" rx="10" fill="#fff"/>
+<text x="210" y="468" font-size="12" font-weight="700" fill="#9b8f89" text-anchor="middle">아니오</text>
+<rect x="230" y="435" width="160" height="90" rx="16" fill="#fdf9e9" stroke="#e4d184" stroke-width="2"/>
+<text x="310.0" y="477.0" font-size="16.5" font-weight="700" fill="#2e2a28" text-anchor="middle">기억 검색</text>
+<text x="310.0" y="498.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="middle">Chroma RAG</text>
+<path d="M390,480 L414,480" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<rect x="418" y="435" width="168" height="90" rx="16" fill="#f6f3fd" stroke="#cbbdec" stroke-width="2"/>
+<text x="502.0" y="471.0" font-size="16.5" font-weight="700" fill="#2e2a28" text-anchor="middle">LLM 입력</text>
+<text x="502.0" y="492.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="middle">말 + 표정 감정 +</text>
+<text x="502.0" y="509.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="middle">기억 + 대화 이력</text>
+<path d="M586,480 L610,480" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<rect x="614" y="435" width="172" height="90" rx="16" fill="#f6f3fd" stroke="#cbbdec" stroke-width="2"/>
+<text x="700.0" y="471.0" font-size="16.5" font-weight="700" fill="#2e2a28" text-anchor="middle">응답 생성</text>
+<text x="700.0" y="492.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="middle">Groq · JSON 응답</text>
+<text x="700.0" y="509.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="middle">답변 · 표정 · 위험도</text>
+<path d="M786,480 L810,480" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<rect x="814" y="435" width="180" height="90" rx="16" fill="#f3faf3" stroke="#bddcc0" stroke-width="2"/>
+<circle cx="854" cy="480.0" r="22" fill="#7fa889"/>
+<path d="M843,475.0 h5 l7,-6 v22 l-7,-6 h-5 z" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round"/><path d="M860,475.0 a7,7 0 0 1 0,10 M864,471.0 a12,12 0 0 1 0,18" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round"/>
+<text x="886" y="471.0" font-size="16.5" font-weight="700" fill="#2e2a28" text-anchor="start">TTS 출력</text>
+<text x="886" y="492.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="start">Fish Audio</text>
+<text x="886" y="509.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="start">가족 목소리</text>
+<path d="M118,552 L118.0,602.0 Q118,616 132.0,616.0 L226,616" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<rect x="103.5" y="565" width="29" height="20" rx="10" fill="#fff"/>
+<text x="118" y="580" font-size="12" font-weight="700" fill="#d9707f" text-anchor="middle">예</text>
+<rect x="230" y="580" width="370" height="72" rx="16" fill="#fdf0f1" stroke="#eab0b8" stroke-width="2"/>
+<circle cx="270" cy="616.0" r="22" fill="#d9707f"/>
+<path d="M270,604.0 l10,4 v6 c0,7 -5,11 -10,13 c-5,-2 -10,-6 -10,-13 v-6 z" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round"/><path d="M270,612.0 v6 M270,622.0 v0.5" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round"/>
+<text x="302" y="613.0" font-size="16.5" font-weight="700" fill="#2e2a28" text-anchor="start">정해진 답으로 응답</text>
+<text x="302" y="634.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="start">LLM 생략 · 보호자 앱에 즉시 알림</text>
+<path d="M600,616 L890.0,616.0 Q904,616 904.0,602.0 L904,529" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<path d="M994,480 L1016,480" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<path d="M1080,420 L1142,480 L1080,540 L1018,480 Z" fill="#fdf9e9" stroke="#e4d184" stroke-width="2" stroke-linejoin="round"/>
+<text x="1080" y="464" font-size="16" font-weight="700" fill="#2e2a28" text-anchor="middle">계속</text>
+<text x="1080" y="484" font-size="16" font-weight="700" fill="#2e2a28" text-anchor="middle">대화?</text>
+<text x="1080" y="506" font-size="11.5" font-weight="400" fill="#7d726d" text-anchor="middle"></text>
+<path d="M1142,480 L1170,480" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<path d="M1080,378 L1080,394" stroke="#fff" stroke-width="10"/>
+<path d="M1080,420 L1080.0,366.0 Q1080,352 1066.0,352.0 L754.0,352.0 Q740,352 740.0,338.0 L740,254" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<rect x="1039.5" y="394" width="81" height="20" rx="10" fill="#fff"/>
+<text x="1080" y="409" font-size="12" font-weight="700" fill="#9b8f89" text-anchor="middle">말씀 계속</text>
+<rect x="1174" y="435" width="150" height="90" rx="16" fill="#fdf4f0" stroke="#ecc8b9" stroke-width="2"/>
+<text x="1249.0" y="471.0" font-size="16.5" font-weight="700" fill="#2e2a28" text-anchor="middle">Idle 복귀</text>
+<text x="1249.0" y="492.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="middle">대기 초과 시 종료</text>
+<text x="1249.0" y="509.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="middle">종료 효과음</text>
+<rect x="944" y="580" width="296" height="72" rx="16" fill="#faf8f7" stroke="#cfc4bf" stroke-width="2" stroke-dasharray="6 5"/>
+<text x="1092.0" y="613.0" font-size="16.5" font-weight="700" fill="#2e2a28" text-anchor="middle">서버 보고 → 보호자 앱</text>
+<text x="1092.0" y="634.0" font-size="12" font-weight="400" fill="#7d726d" text-anchor="middle">감정 · 발화 · 안전 이벤트 · 대화중 상태</text>
+<text x="842" y="596" font-size="0"></text>
+<path d="M1260,525 L1260.0,704.0 Q1260,718 1246.0,718.0 L34.0,718.0 Q20,718 20.0,704.0 L20.0,214.0 Q20,200 28.0,200.0 L36,200" fill="none" stroke="#cbbdb6" stroke-width="2.4" stroke-linejoin="round" marker-end="url(#arr)"/>
+<text x="280" y="700" font-size="22" font-weight="800" fill="#8c7064" text-anchor="start">03 AI 응답</text>
+<text x="1100" y="700" font-size="22" font-weight="800" fill="#8c7064" text-anchor="start">04 복귀</text></svg>
