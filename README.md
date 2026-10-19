@@ -68,7 +68,11 @@ Flutter 앱으로 어르신 상태를 보고,
 ## 🗺 시스템 구성
 
 <div align="center">
-  <img src="assets/remory_flow.svg" alt="ReMory 디바이스 구조도" width="100%" />
+  <img src="assets/remory_flow.svg" alt="ReMory 서비스 플로우" width="100%" />
+</div>
+
+<div align="center">
+  <img src="assets/remory_hardware.jpeg" alt="ReMory 하드웨어 구성도" width="100%" />
 </div>
 
 <br/>
