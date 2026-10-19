@@ -1,0 +1,191 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2770" height="1718" viewBox="0 0 2770 1718" font-family="Noto Sans CJK KR, Pretendard, sans-serif">
+<defs><marker id="solid" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,1 L9,5 L0,9 z" fill="#3a3a48"/></marker><marker id="open" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,1 L9,5 L0,9" fill="none" stroke="#3a3a48" stroke-width="1.4"/></marker></defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<rect x="18" y="110" width="2734" height="242" rx="10" fill="#faf9ff" stroke="#d9d4fb"/>
+<text x="32" y="131" font-size="17" font-weight="700" fill="#4a3fc0">① 깨우기</text>
+<rect x="18" y="1476" width="2734" height="110" rx="10" fill="#faf9ff" stroke="#d9d4fb"/>
+<text x="32" y="1497" font-size="17" font-weight="700" fill="#4a3fc0">③ 대화 종료 · 대기 시간 초과</text>
+<line x1="125.0" y1="88" x2="125.0" y2="1630" stroke="#2c2c38" stroke-width="1"/>
+<line x1="377.0" y1="88" x2="377.0" y2="1630" stroke="#2c2c38" stroke-width="1"/>
+<line x1="629.0" y1="88" x2="629.0" y2="1630" stroke="#2c2c38" stroke-width="1"/>
+<line x1="881.0" y1="88" x2="881.0" y2="1630" stroke="#2c2c38" stroke-width="1"/>
+<line x1="1133.0" y1="88" x2="1133.0" y2="1630" stroke="#2c2c38" stroke-width="1"/>
+<line x1="1385.0" y1="88" x2="1385.0" y2="1630" stroke="#2c2c38" stroke-width="1"/>
+<line x1="1637.0" y1="88" x2="1637.0" y2="1630" stroke="#2c2c38" stroke-width="1"/>
+<line x1="1889.0" y1="88" x2="1889.0" y2="1630" stroke="#2c2c38" stroke-width="1"/>
+<line x1="2141.0" y1="88" x2="2141.0" y2="1630" stroke="#2c2c38" stroke-width="1"/>
+<line x1="2393.0" y1="88" x2="2393.0" y2="1630" stroke="#2c2c38" stroke-width="1"/>
+<line x1="2645.0" y1="88" x2="2645.0" y2="1630" stroke="#2c2c38" stroke-width="1"/>
+<rect x="30" y="390" width="2710" height="1048" rx="6" fill="none" stroke="#4a8fd6" stroke-width="1.4"/>
+<path d="M30,390 h43.839999999999996 v14 l-7,7 h-36.839999999999996 z" fill="#4a8fd6"/>
+<text x="37" y="405" font-size="12" font-weight="700" fill="#fff">loop</text>
+<text x="81.84" y="406" font-size="16" font-weight="600" fill="#4a8fd6">[② 대화 턴 반복 · 말끝 침묵 2초면 한 턴 종료]</text>
+<rect x="539.0" y="807" width="2196.0" height="364" rx="6" fill="none" stroke="#e05a6a" stroke-width="1.4"/>
+<path d="M539.0,807 h36.879999999999995 v14 l-7,7 h-29.879999999999995 z" fill="#e05a6a"/>
+<text x="546.0" y="822" font-size="12" font-weight="700" fill="#fff">alt</text>
+<text x="583.88" y="823" font-size="16" font-weight="600" fill="#e05a6a">[자해 신호]</text>
+<line x1="539.0" y1="894" x2="2735.0" y2="894" stroke="#e05a6a" stroke-dasharray="6 4"/>
+<text x="547.0" y="912" font-size="16" font-weight="600" fill="#e05a6a">[그 외]</text>
+<rect x="539.0" y="1070" width="2196.0" height="77" rx="6" fill="none" stroke="#8a8aa0" stroke-width="1.4"/>
+<path d="M539.0,1070 h36.879999999999995 v14 l-7,7 h-29.879999999999995 z" fill="#8a8aa0"/>
+<text x="546.0" y="1085" font-size="12" font-weight="700" fill="#fff">opt</text>
+<text x="583.88" y="1086" font-size="16" font-weight="600" fill="#8a8aa0">[LLM이 더 급한 위험을 판단]</text>
+<rect x="35.0" y="1238" width="684.0" height="77" rx="6" fill="none" stroke="#8a8aa0" stroke-width="1.4"/>
+<path d="M35.0,1238 h36.879999999999995 v14 l-7,7 h-29.879999999999995 z" fill="#8a8aa0"/>
+<text x="42.0" y="1253" font-size="12" font-weight="700" fill="#fff">opt</text>
+<text x="79.88" y="1254" font-size="16" font-weight="600" fill="#8a8aa0">[기억을 꺼내 말한 경우]</text>
+<line x1="125.0" y1="164" x2="373.0" y2="164" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#solid)"/>
+<rect x="169.14" y="139" width="163.72" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="251.0" y="156" text-anchor="middle" font-size="17" fill="#1f1f2e">인형 앞으로 다가옴</text>
+<line x1="377.0" y1="197" x2="625.0" y2="197" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#solid)"/>
+<rect x="305.19999999999993" y="172" width="395.6000000000001" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="503.0" y="189" text-anchor="middle" font-size="17" fill="#1f1f2e">재실 감지 → 팬틸트 얼굴 추적 시작 (아두이노)</text>
+<line x1="125.0" y1="230" x2="877.0" y2="230" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#solid)"/>
+<rect x="463.64" y="205" width="78.72" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="503.0" y="222" text-anchor="middle" font-size="17" fill="#1f1f2e">&quot;모리야&quot;</text>
+<line x1="881.0" y1="263" x2="633.0" y2="263" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#solid)"/>
+<rect x="686.5699999999999" y="238" width="136.86" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="755.0" y="255" text-anchor="middle" font-size="17" fill="#1f1f2e">웨이크워드 감지</text>
+<line x1="629.0" y1="296" x2="129.0" y2="296" stroke="#3a3a48" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#solid)"/>
+<rect x="270.49" y="271" width="213.01999999999998" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="377.0" y="288" text-anchor="middle" font-size="17" fill="#1f1f2e">&#x27;띵&#x27; 효과음 + 경청 표정</text>
+<line x1="629.0" y1="329" x2="2641.0" y2="329" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#open)"/>
+<rect x="1491.56" y="304" width="290.88000000000005" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1637.0" y="321" text-anchor="middle" font-size="17" fill="#1f1f2e">대화중 보고 → 앱에 &#x27;대화중&#x27; 표시</text>
+<line x1="125.0" y1="444" x2="877.0" y2="444" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#solid)"/>
+<rect x="390.19999999999993" y="419" width="225.60000000000008" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="503.0" y="436" text-anchor="middle" font-size="17" fill="#1f1f2e">발화 (라이브 녹음 + VAD)</text>
+<line x1="881.0" y1="477" x2="1129.0" y2="477" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#solid)"/>
+<rect x="762.6199999999999" y="452" width="488.7600000000001" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1007.0" y="469" text-anchor="middle" font-size="17" fill="#1f1f2e">발화 시작 → 0.7초 간격 캡처·분류 (얼굴 원본 즉시 폐기)</text>
+<line x1="881.0" y1="510" x2="1129.0" y2="510" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#solid)"/>
+<rect x="972.57" y="485" width="68.86" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1007.0" y="502" text-anchor="middle" font-size="17" fill="#1f1f2e">발화 끝</text>
+<line x1="1133.0" y1="543" x2="633.0" y2="543" stroke="#3a3a48" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#solid)"/>
+<rect x="745.42" y="518" width="271.16" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="881.0" y="535" text-anchor="middle" font-size="17" fill="#1f1f2e">표정 감정 (신뢰도 가중 다수결)</text>
+<line x1="881.0" y1="576" x2="633.0" y2="576" stroke="#3a3a48" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#solid)"/>
+<rect x="712.07" y="551" width="85.86" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="755.0" y="568" text-anchor="middle" font-size="17" fill="#1f1f2e">녹음 음성</text>
+<line x1="629.0" y1="609" x2="129.0" y2="609" stroke="#3a3a48" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#solid)"/>
+<rect x="266.91999999999996" y="584" width="220.16000000000003" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="377.0" y="601" text-anchor="middle" font-size="17" fill="#1f1f2e">생각 중 표정 + 로딩 음악</text>
+<line x1="629.0" y1="642" x2="1381.0" y2="642" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#solid)"/>
+<rect x="923.78" y="617" width="166.44" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1007.0" y="634" text-anchor="middle" font-size="17" fill="#1f1f2e">음성 → 텍스트 변환</text>
+<line x1="1385.0" y1="675" x2="633.0" y2="675" stroke="#3a3a48" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#solid)"/>
+<rect x="870.06" y="650" width="273.88000000000005" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1007.0" y="667" text-anchor="middle" font-size="17" fill="#1f1f2e">텍스트 (짧은 클립 · 환청 필터)</text>
+<line x1="629.0" y1="708" x2="1633.0" y2="708" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#solid)"/>
+<rect x="1046.21" y="683" width="173.57999999999998" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1133.0" y="700" text-anchor="middle" font-size="17" fill="#1f1f2e">규칙 기반 위험 판별</text>
+<line x1="1637.0" y1="741" x2="633.0" y2="741" stroke="#3a3a48" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#solid)"/>
+<rect x="935.1999999999999" y="716" width="395.6000000000001" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1133.0" y="733" text-anchor="middle" font-size="17" fill="#1f1f2e">위험 종류 (자해·타해·의료·학대·거친 말·없음)</text>
+<line x1="629.0" y1="774" x2="2641.0" y2="774" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#open)"/>
+<rect x="1470.99" y="749" width="332.02000000000004" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1637.0" y="766" text-anchor="middle" font-size="17" fill="#1f1f2e">감정 보고 (부정 감정이면 보호자 푸시)</text>
+<line x1="629.0" y1="861" x2="2641.0" y2="861" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#open)"/>
+<rect x="1362.1899999999998" y="836" width="549.6200000000002" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1637.0" y="853" text-anchor="middle" font-size="17" fill="#1f1f2e">안전 이벤트 → 보호자 즉시 푸시 (LLM 생략, 정해진 답으로 응답)</text>
+<line x1="629.0" y1="938" x2="1885.0" y2="938" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#solid)"/>
+<rect x="1108.6299999999999" y="913" width="300.74000000000007" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1259.0" y="930" text-anchor="middle" font-size="17" fill="#1f1f2e">기억 검색 (직전 발화 + 현재 발화)</text>
+<line x1="1889.0" y1="971" x2="633.0" y2="971" stroke="#3a3a48" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#solid)"/>
+<rect x="1140.42" y="946" width="237.16000000000003" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1259.0" y="963" text-anchor="middle" font-size="17" fill="#1f1f2e">관련 기억 (턴별 표식 삽입)</text>
+<line x1="629.0" y1="1004" x2="2137.0" y2="1004" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#solid)"/>
+<rect x="1162.55" y="979" width="444.90000000000015" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1385.0" y="996" text-anchor="middle" font-size="17" fill="#1f1f2e">텍스트 + 표정 감정 + 기억 + 대화 이력 + 안전 힌트</text>
+<line x1="2141.0" y1="1037" x2="633.0" y2="1037" stroke="#3a3a48" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#solid)"/>
+<rect x="1159.1499999999999" y="1012" width="451.70000000000044" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1385.0" y="1029" text-anchor="middle" font-size="17" fill="#1f1f2e">JSON { reply, expression, risk, used_memory }</text>
+<line x1="629.0" y1="1124" x2="2641.0" y2="1124" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#open)"/>
+<rect x="1563.64" y="1099" width="146.72" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1637.0" y="1116" text-anchor="middle" font-size="17" fill="#1f1f2e">안전 이벤트 보고</text>
+<line x1="629.0" y1="1205" x2="2641.0" y2="1205" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#open)"/>
+<rect x="1495.1299999999999" y="1180" width="283.74000000000007" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1637.0" y="1197" text-anchor="middle" font-size="17" fill="#1f1f2e">발화 기록 (어르신 말 + 모리 답)</text>
+<line x1="629.0" y1="1292" x2="129.0" y2="1292" stroke="#3a3a48" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#solid)"/>
+<rect x="290.21000000000004" y="1267" width="173.57999999999998" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="377.0" y="1284" text-anchor="middle" font-size="17" fill="#1f1f2e">관련 사진 화면 표시</text>
+<line x1="629.0" y1="1349" x2="2389.0" y2="1349" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#solid)"/>
+<rect x="1344.99" y="1324" width="332.02000000000004" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1511.0" y="1341" text-anchor="middle" font-size="17" fill="#1f1f2e">답변 텍스트 (앱에서 고른 가족 목소리)</text>
+<line x1="2393.0" y1="1382" x2="633.0" y2="1382" stroke="#3a3a48" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#solid)"/>
+<rect x="1451.07" y="1357" width="119.86" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1511.0" y="1374" text-anchor="middle" font-size="17" fill="#1f1f2e">스트리밍 음성</text>
+<line x1="629.0" y1="1415" x2="129.0" y2="1415" stroke="#3a3a48" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#solid)"/>
+<rect x="216.76999999999998" y="1390" width="320.46000000000004" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="377.0" y="1407" text-anchor="middle" font-size="17" fill="#1f1f2e">표정 · 징글 + 음성 출력 (입 움직임)</text>
+<line x1="629.0" y1="1530" x2="129.0" y2="1530" stroke="#3a3a48" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#solid)"/>
+<rect x="215.92" y="1505" width="322.16" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="377.0" y="1522" text-anchor="middle" font-size="17" fill="#1f1f2e">종료 효과음 → 웨이크워드 대기로 복귀</text>
+<line x1="629.0" y1="1563" x2="2641.0" y2="1563" stroke="#3a3a48" stroke-width="1.4"  marker-end="url(#open)"/>
+<rect x="1318.33" y="1538" width="637.3400000000001" height="21" fill="#ffffff" opacity="0.92"/>
+<text x="1637.0" y="1555" text-anchor="middle" font-size="17" fill="#1f1f2e">대화 종료 + 일과 기록 (&quot;N번 주고받았어요&quot;) → 홈 화면·데일리 리포트 반영</text>
+<rect x="40.0" y="30" width="170" height="58" rx="7" fill="#fdf2fe" stroke="#d46bd8" stroke-width="1.6"/>
+<text x="125.0" y="66" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">어르신</text>
+<rect x="292.0" y="30" width="170" height="58" rx="7" fill="#eef4fd" stroke="#5f8fd6" stroke-width="1.6"/>
+<text x="377.0" y="56" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">mmWave 레이더</text>
+<text x="377.0" y="76" text-anchor="middle" font-size="14" fill="#6a6a7a">재실 감지</text>
+<rect x="544.0" y="30" width="170" height="58" rx="7" fill="#fff5ec" stroke="#e8954a" stroke-width="1.6"/>
+<text x="629.0" y="56" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">모리 메인</text>
+<text x="629.0" y="76" text-anchor="middle" font-size="14" fill="#6a6a7a">Raspberry Pi 5</text>
+<rect x="796.0" y="30" width="170" height="58" rx="7" fill="#ebfaf8" stroke="#3cbfb0" stroke-width="1.6"/>
+<text x="881.0" y="56" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">웨이크워드·VAD</text>
+<text x="881.0" y="76" text-anchor="middle" font-size="14" fill="#6a6a7a">openWakeWord</text>
+<rect x="1048.0" y="30" width="170" height="58" rx="7" fill="#ecfafd" stroke="#46c4dc" stroke-width="1.6"/>
+<text x="1133.0" y="56" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">표정 감정</text>
+<text x="1133.0" y="76" text-anchor="middle" font-size="14" fill="#6a6a7a">카메라·YuNet</text>
+<rect x="1300.0" y="30" width="170" height="58" rx="7" fill="#eefaf0" stroke="#4fbf6a" stroke-width="1.6"/>
+<text x="1385.0" y="56" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">STT</text>
+<text x="1385.0" y="76" text-anchor="middle" font-size="14" fill="#6a6a7a">Whisper · Hailo</text>
+<rect x="1552.0" y="30" width="170" height="58" rx="7" fill="#fdeff1" stroke="#e05a6a" stroke-width="1.6"/>
+<text x="1637.0" y="56" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">안전 판별</text>
+<text x="1637.0" y="76" text-anchor="middle" font-size="14" fill="#6a6a7a">safety.py</text>
+<rect x="1804.0" y="30" width="170" height="58" rx="7" fill="#fffbe8" stroke="#e0bf3a" stroke-width="1.6"/>
+<text x="1889.0" y="56" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">기억 DB</text>
+<text x="1889.0" y="76" text-anchor="middle" font-size="14" fill="#6a6a7a">Chroma RAG</text>
+<rect x="2056.0" y="30" width="170" height="58" rx="7" fill="#f0f2fe" stroke="#7a8cf0" stroke-width="1.6"/>
+<text x="2141.0" y="56" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">LLM</text>
+<text x="2141.0" y="76" text-anchor="middle" font-size="14" fill="#6a6a7a">Groq</text>
+<rect x="2308.0" y="30" width="170" height="58" rx="7" fill="#f4fbea" stroke="#8fcf3c" stroke-width="1.6"/>
+<text x="2393.0" y="56" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">TTS</text>
+<text x="2393.0" y="76" text-anchor="middle" font-size="14" fill="#6a6a7a">Fish Audio</text>
+<rect x="2560.0" y="30" width="170" height="58" rx="7" fill="#f4effe" stroke="#9a6cf0" stroke-width="1.6"/>
+<text x="2645.0" y="56" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">백엔드 · 보호자 앱</text>
+<text x="2645.0" y="76" text-anchor="middle" font-size="14" fill="#6a6a7a">FastAPI · FCM</text>
+<rect x="40.0" y="1630" width="170" height="58" rx="7" fill="#fdf2fe" stroke="#d46bd8" stroke-width="1.6"/>
+<text x="125.0" y="1666" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">어르신</text>
+<rect x="292.0" y="1630" width="170" height="58" rx="7" fill="#eef4fd" stroke="#5f8fd6" stroke-width="1.6"/>
+<text x="377.0" y="1656" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">mmWave 레이더</text>
+<text x="377.0" y="1676" text-anchor="middle" font-size="14" fill="#6a6a7a">재실 감지</text>
+<rect x="544.0" y="1630" width="170" height="58" rx="7" fill="#fff5ec" stroke="#e8954a" stroke-width="1.6"/>
+<text x="629.0" y="1656" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">모리 메인</text>
+<text x="629.0" y="1676" text-anchor="middle" font-size="14" fill="#6a6a7a">Raspberry Pi 5</text>
+<rect x="796.0" y="1630" width="170" height="58" rx="7" fill="#ebfaf8" stroke="#3cbfb0" stroke-width="1.6"/>
+<text x="881.0" y="1656" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">웨이크워드·VAD</text>
+<text x="881.0" y="1676" text-anchor="middle" font-size="14" fill="#6a6a7a">openWakeWord</text>
+<rect x="1048.0" y="1630" width="170" height="58" rx="7" fill="#ecfafd" stroke="#46c4dc" stroke-width="1.6"/>
+<text x="1133.0" y="1656" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">표정 감정</text>
+<text x="1133.0" y="1676" text-anchor="middle" font-size="14" fill="#6a6a7a">카메라·YuNet</text>
+<rect x="1300.0" y="1630" width="170" height="58" rx="7" fill="#eefaf0" stroke="#4fbf6a" stroke-width="1.6"/>
+<text x="1385.0" y="1656" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">STT</text>
+<text x="1385.0" y="1676" text-anchor="middle" font-size="14" fill="#6a6a7a">Whisper · Hailo</text>
+<rect x="1552.0" y="1630" width="170" height="58" rx="7" fill="#fdeff1" stroke="#e05a6a" stroke-width="1.6"/>
+<text x="1637.0" y="1656" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">안전 판별</text>
+<text x="1637.0" y="1676" text-anchor="middle" font-size="14" fill="#6a6a7a">safety.py</text>
+<rect x="1804.0" y="1630" width="170" height="58" rx="7" fill="#fffbe8" stroke="#e0bf3a" stroke-width="1.6"/>
+<text x="1889.0" y="1656" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">기억 DB</text>
+<text x="1889.0" y="1676" text-anchor="middle" font-size="14" fill="#6a6a7a">Chroma RAG</text>
+<rect x="2056.0" y="1630" width="170" height="58" rx="7" fill="#f0f2fe" stroke="#7a8cf0" stroke-width="1.6"/>
+<text x="2141.0" y="1656" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">LLM</text>
+<text x="2141.0" y="1676" text-anchor="middle" font-size="14" fill="#6a6a7a">Groq</text>
+<rect x="2308.0" y="1630" width="170" height="58" rx="7" fill="#f4fbea" stroke="#8fcf3c" stroke-width="1.6"/>
+<text x="2393.0" y="1656" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">TTS</text>
+<text x="2393.0" y="1676" text-anchor="middle" font-size="14" fill="#6a6a7a">Fish Audio</text>
+<rect x="2560.0" y="1630" width="170" height="58" rx="7" fill="#f4effe" stroke="#9a6cf0" stroke-width="1.6"/>
+<text x="2645.0" y="1656" text-anchor="middle" font-size="18" font-weight="700" fill="#1f1f2e">백엔드 · 보호자 앱</text>
+<text x="2645.0" y="1676" text-anchor="middle" font-size="14" fill="#6a6a7a">FastAPI · FCM</text>
+</svg>
