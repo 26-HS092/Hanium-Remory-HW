@@ -70,8 +70,8 @@ MEDICATION_CHECK_INTERVAL_SEC = 30
 MED_CONFIRM_DELAY_SEC = 15 * 60
 # 연결 신호를 몇 초마다 보낼지. 서버는 600초 넘게 끊기면 '연결 끊김'으로 본다.
 CONNECTION_INTERVAL_SEC = 300
-# 서버에서 볼륨·방해금지를 몇 초마다 읽어올지
-SETTINGS_SYNC_INTERVAL_SEC = 60
+# 서버에서 볼륨·방해금지·기본 목소리를 몇 초마다 읽어올지. 앱에서 목소리를 바꾸면 이 안에 반영된다.
+SETTINGS_SYNC_INTERVAL_SEC = 30
 # 가족 채팅을 몇 초마다 확인할지
 CHAT_CHECK_INTERVAL_SEC = 15
 # 가족 메시지를 읽어드린 뒤 답장을 몇 초까지 기다릴지. 말씀을 시작하시면
