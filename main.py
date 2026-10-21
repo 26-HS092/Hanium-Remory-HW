@@ -76,9 +76,14 @@ MED_CONFIRM_DELAY_SEC = 15 * 60
 # 연결 신호를 몇 초마다 보낼지. 서버는 600초 넘게 끊기면 '연결 끊김'으로 본다.
 CONNECTION_INTERVAL_SEC = 300
 # 서버에서 볼륨·방해금지를 몇 초마다 읽어올지
-SETTINGS_SYNC_INTERVAL_SEC = 60
+SETTINGS_SYNC_INTERVAL_SEC = 15
 # 가족 채팅을 몇 초마다 확인할지
 CHAT_CHECK_INTERVAL_SEC = 15
+# 메시지를 읽어드린 뒤 이어서 오는 메시지가 있는지 몇 초 더 지켜볼지.
+# 가족이 여러 개를 나눠 보내도 다 읽어드린 다음에 답장을 한 번만 여쭌다.
+CHAT_SETTLE_SEC = 8
+# 그동안 몇 초마다 확인할지
+CHAT_SETTLE_POLL_SEC = 2
 # 가족 메시지를 읽어드린 뒤 답장을 몇 초까지 기다릴지. 말씀을 시작하시면
 # 끝날 때까지 듣는다(이 시간은 '시작' 을 기다리는 시간이다).
 REPLY_WAIT_SEC = 8
@@ -122,6 +127,9 @@ _alert_seq = 0
 # 쥐고 있어 다른 스레드가 열면 부딪친다). reply_wake 는 웨이크워드 대기를 끊는다.
 reply_requests: "queue.Queue[dict]" = queue.Queue()
 reply_wake = threading.Event()
+# 답장을 여쭙는 중(요청을 넣은 때부터 끝날 때까지). 그동안 온 메시지는 채팅
+# 워커가 읽지 않고 두었다가, 끝난 뒤에 모아 읽고 다시 여쭌다.
+reply_pending = threading.Event()
 
 # 마이크 디바이스 인덱스. None이면 시스템 default 입력 사용(권장).
 MIC_DEVICE_INDEX = None
@@ -190,16 +198,6 @@ except Exception as _e:                          # pragma: no cover
 
 # 웨이크워드가 들렸을 때 카메라가 이 시간 안에 사람을 못 잡았으면 빠르게 찾게 한다.
 WAKE_NEEDS_TARGET_SEC = 3.0
-
-
-class _AnyEvent:
-    """여러 Event 중 하나라도 켜지면 켜진 것으로 본다. 웨이크워드 대기를 끊는 데 쓴다."""
-
-    def __init__(self, *events):
-        self._events = [e for e in events if e is not None]
-
-    def is_set(self) -> bool:
-        return any(e.is_set() for e in self._events)
 
 
 # RAG retriever.py 안에서 "./chroma_db" 상대경로를 쓰므로 CWD를 RAG 폴더로 이동
@@ -482,6 +480,34 @@ def speak(text: str) -> None:
     앱에서 기본으로 고른 목소리(device_settings["spk_id"])로 말한다(tts_play).
     """
     tts_play(text)
+
+
+def _patient_name() -> str:
+    """어르신 성함. rag_sync 가 동기화 때마다 남기는 JSON 에서 읽는다. 모르면 ""."""
+    try:
+        with open(ROOT / "rag" / "data" / f"patient_{PATIENT_ID}.json",
+                  encoding="utf-8") as f:
+            name = (json.load(f).get("patient_info") or {}).get("name") or ""
+    except (OSError, ValueError):
+        return ""
+    # rag_sync 는 이름이 없을 때 "어르신" 을 넣는다. "어르신님" 이 되지 않게 뺀다.
+    return "" if name.strip() == "어르신" else name.strip()
+
+
+def wake_greeting(now: datetime.datetime | None = None) -> str:
+    """불러 주셨을 때 먼저 건네는 인사. 시간대에 맞춰 안부를 여쭌다."""
+    hour = (now or datetime.datetime.now()).hour
+    name = _patient_name()
+    who = f"{name}님" if name else "어르신"
+    if 5 <= hour < 11:
+        return f"좋은 아침이에요, {who}! 밤새 잘 주무셨어요?"
+    if 11 <= hour < 14:
+        return f"좋은 오후예요, {who}! 점심은 맛있게 드셨어요?"
+    if 14 <= hour < 18:
+        return f"좋은 오후예요, {who}! 오늘 하루는 어떻게 보내고 계세요?"
+    if 18 <= hour < 22:
+        return f"좋은 저녁이에요, {who}! 저녁 진지는 드셨어요?"
+    return f"{who}, 밤이 늦었네요. 잠이 잘 안 오세요?"
 
 
 def _open_mic_tap() -> MicTap | None:
@@ -995,8 +1021,12 @@ def _sender_label(m: dict) -> str:
     return "가족"
 
 
-def _deliver_chat(m: dict, face=None) -> None:
-    """가족 메시지 하나를 인형이 전한다. 글=TTS, 사진=화면(PHOTO_DISPLAY_SEC 초)."""
+def _deliver_chat(m: dict, face=None, intro: str = "", cue: bool = True) -> None:
+    """가족 메시지 하나를 인형이 전한다. 글=TTS, 사진=화면(PHOTO_DISPLAY_SEC 초).
+
+    intro: 메시지 앞에 먼저 할 말("메시지가 3개 왔어요.").
+    cue: 알림음을 낼지. 여러 개를 이어 읽을 땐 첫 메시지에만 낸다.
+    """
     content = (m.get("content") or "").strip()
     image_url = m.get("imageUrl")
 
@@ -1018,8 +1048,10 @@ def _deliver_chat(m: dict, face=None) -> None:
         try:
             # 다른 방에 계셔도 첫마디를 놓치지 않게 먼저 주의를 끈다.
             # 방해 금지 시간에는 소리로 깨우지 않는다.
-            if not in_dnd(device_settings["dnd"]):
+            if cue and not in_dnd(device_settings["dnd"]):
                 _play_cue("message")
+            if intro:
+                speak(intro)
             if content:
                 speak(f"{sender}에게서 메시지가 왔어요. {content}")
             if image_url:
@@ -1206,32 +1238,73 @@ def _tell_reply_result(sent: bool, face=None) -> None:
             face.hide_notice()
 
 
+def _fetch_pending_chats(headers: dict) -> list[dict]:
+    r = requests.get(
+        f"{REMORY_API}/devices/{DEVICE_ID}/chat/pending",
+        headers=headers, timeout=30,
+    )
+    return (r.json().get("data") or {}).get("messages", [])
+
+
+def _deliver_chats(msgs: list[dict], headers: dict, face=None,
+                   first: bool = True) -> None:
+    """받은 메시지들을 차례로 읽어드리고 전달 완료로 알린다.
+
+    first: 이번 묶음이 처음 읽는 것인지. 알림음과 "N개 왔어요" 는 처음에만 한다.
+    """
+    for i, m in enumerate(msgs):
+        intro = ""
+        if first and i == 0 and len(msgs) > 1:
+            intro = f"가족 대화방에 메시지가 {len(msgs)}개 왔어요. 차례로 읽어드릴게요."
+        _deliver_chat(m, face, intro=intro, cue=(first and i == 0))
+    requests.post(
+        f"{REMORY_API}/devices/{DEVICE_ID}/chat/delivered",
+        json={"messageIds": [m["messageId"] for m in msgs]},
+        headers=headers, timeout=30,
+    )
+
+
 def chat_worker(face=None) -> None:
-    """가족이 보낸 메시지(글·사진)를 받아 인형이 전한다."""
+    """가족이 보낸 메시지(글·사진)를 받아 인형이 전한다.
+
+    여러 개가 오면 다 읽어드린 뒤에 답장을 한 번만 여쭌다. 나눠 보낸
+    메시지도 놓치지 않게, 읽은 뒤 CHAT_SETTLE_SEC 동안 더 오는지 지켜본다.
+    """
     headers = {"X-Device-Token": DEVICE_TOKEN}
     while True:
+        # 답장을 여쭙는 중에 온 메시지는 끝난 뒤에 읽는다(버튼 위로 겹치지 않게).
+        if reply_pending.is_set():
+            time.sleep(1)
+            continue
         try:
-            r = requests.get(
-                f"{REMORY_API}/devices/{DEVICE_ID}/chat/pending",
-                headers=headers, timeout=30,
-            )
-            msgs = (r.json().get("data") or {}).get("messages", [])
+            msgs = _fetch_pending_chats(headers)
             if msgs:
-                for m in msgs:
-                    _deliver_chat(m, face)
-                ids = [m["messageId"] for m in msgs]
-                requests.post(
-                    f"{REMORY_API}/devices/{DEVICE_ID}/chat/delivered",
-                    json={"messageIds": ids}, headers=headers, timeout=30,
-                )
+                _deliver_chats(msgs, headers, face, first=True)
+                last = msgs[-1]
+                has_photo = any(m.get("imageUrl") for m in msgs)
+
+                # 이어서 오는 메시지가 있으면 그것까지 다 읽는다.
+                deadline = time.monotonic() + CHAT_SETTLE_SEC
+                while time.monotonic() < deadline:
+                    time.sleep(CHAT_SETTLE_POLL_SEC)
+                    more = _fetch_pending_chats(headers)
+                    if more:
+                        _deliver_chats(more, headers, face, first=False)
+                        last = more[-1]
+                        has_photo = has_photo or any(m.get("imageUrl") for m in more)
+                        deadline = time.monotonic() + CHAT_SETTLE_SEC
+
                 # 다 읽어드렸으면 답장을 받아 달라고 메인 루프에 부탁한다.
                 # 방해 금지 시간에는 말씀을 청하지 않는다.
                 if not in_dnd(device_settings["dnd"]):
                     # 사진이 왔으면 먼저 사진을 보실 시간을 드린다.
-                    if face and any(m.get("imageUrl") for m in msgs):
-                        time.sleep(PHOTO_REPLY_DELAY_SEC)
-                    reply_requests.put({"sender": _sender_label(msgs[-1])})
+                    # (기다리는 동안 지켜본 시간만큼은 이미 보셨다.)
+                    if face and has_photo:
+                        time.sleep(max(0, PHOTO_REPLY_DELAY_SEC - CHAT_SETTLE_SEC))
+                    reply_pending.set()
+                    reply_requests.put({"sender": _sender_label(last)})
                     reply_wake.set()
+                    continue    # 답장이 끝나면 바로 다시 확인한다
         except Exception as e:
             print(f"⚠️  채팅 전달 오류: {e}")
         time.sleep(CHAT_CHECK_INTERVAL_SEC)
@@ -1417,7 +1490,7 @@ def main() -> None:
         input_device_index=WAKEWORD_DEVICE_INDEX,
     )
 
-    # 📡 mmWave 레이더: 사람이 없으면 팬틸트를 쉬고 웨이크워드도 안 듣는다.
+    # 📡 mmWave 레이더: 사람이 없으면 팬틸트를 쉰다(웨이크워드는 늘 듣는다).
     presence = create_presence() if create_presence is not None else None
 
     # 🎯 얼굴 트래킹 ①: Hailo 트래커(아두이노 팬틸트)는 Pi 카메라를 직접 열고,
@@ -1518,7 +1591,10 @@ def main() -> None:
             if reply_req:
                 _close_mic_tap(mic_tap)     # 답장 녹음이 마이크를 쓴다
                 mic_tap = None
-                listen_for_reply(reply_req, stt, mic_wav, face)
+                try:
+                    listen_for_reply(reply_req, stt, mic_wav, face)
+                finally:
+                    reply_pending.clear()
                 continue
 
             if not conversation_active:
@@ -1527,16 +1603,10 @@ def main() -> None:
                 if face:
                     face.set_expression("평온")
 
-                # 아무도 없으면 웨이크워드를 듣지 않고 사람이 오기를 기다린다.
-                if presence and not presence.present:
-                    print("📡 아무도 없음 — 사람이 올 때까지 대기")
-                    if not presence.wait_present(stop_event=reply_wake):
-                        continue        # 답장 요청이 왔다
-
-                # 답장 요청이 오거나 사람이 떠나면 웨이크워드 대기를 끊고 위로 돌아간다.
-                if not wakeword_detector.wait_for_wakeword(
-                    stop_event=_AnyEvent(reply_wake, presence and presence.away_event)
-                ):
+                # 레이더·카메라가 사람을 놓쳐도 웨이크워드는 늘 듣는다. 옆에 계신데
+                # 못 잡는 때가 있어, 부르셨는데 대답을 안 하면 안 된다.
+                # 답장 요청이 오면 웨이크워드 대기를 끊고 위로 돌아간다.
+                if not wakeword_detector.wait_for_wakeword(stop_event=reply_wake):
                     continue
 
                 # 카메라에 잡힌 사람이 없어도 대화는 시작한다. 대신 바로 빠르게 찾는다.
@@ -1570,6 +1640,28 @@ def main() -> None:
                 )
                 conv_session_id = conv_logger.new_session_id()
                 report_conversation(True)   # 웨이크워드~ = 대화중 시작
+
+                # 불러 주셨으니 먼저 인사를 건넨다. 대화 기록에도 넣어 다음 답이
+                # 이 안부("점심은 드셨어요?")에 이어지게 한다.
+                greeting = wake_greeting()
+                print(f"🐻 모리(인사): {greeting}")
+                history.append({"role": "assistant", "content": greeting})
+                try:
+                    with speaker_lock:
+                        # 인사 끝에 바로 대답하셔도 듣는다.
+                        mic_tap = _open_mic_tap()
+                        tts_play(
+                            greeting,
+                            on_start=(face.start_speaking if face else None),
+                            stop_event=tts_interrupt,
+                        )
+                        if mic_tap:
+                            mic_tap.end()
+                        last_reply = greeting
+                finally:
+                    if face:
+                        face.stop_speaking()
+                        face.set_expression("경청")
 
             # 약 알림·가족 메시지가 스피커로 말하는 중이면 끝날 때까지 기다렸다 듣는다.
             # 미리 열어 둔 마이크엔 그 소리가 담기므로 버리고 새로 연다.
@@ -1679,7 +1771,7 @@ def main() -> None:
                     # "응 그랬지" 처럼 짧은 답은 그것만으론 찾을 게 없다.
                     # 바로 앞에 하신 말까지 붙여 같은 화제의 기억을 찾는다.
                     rag_query = (f"{history[-2]['content']} {user_text}"
-                                 if history else user_text)
+                                 if len(history) >= 2 else user_text)
                     context = build_context_prompt(PATIENT_ID, rag_query,
                                                    top_k=RAG_TOP_K, mark=mark)
                 except Exception as e:
