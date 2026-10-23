@@ -106,7 +106,7 @@ Flutter 앱으로 어르신 상태를 보고,
 |  `connection_worker` | 300s | "인형이 연결되어 있음"을 서버에 알림 (600s 넘게 끊기면 앱에 '연결 끊김') |
 |  `medication_worker` | 30s | 약 시간이 되면 음성 안내 → 활동 기록 → 15분 뒤 복용 확인 |
 |  `chat_worker` | 15s | 가족이 보낸 글은 TTS + 알림 카드로, 사진은 화면에 30초 표시 |
-|  `settings_worker` | 30s | 볼륨 · 방해 금지 시간 · 기본 목소리(Fish 목소리 모델 ID) 동기화 |
+|  `settings_worker` | 15s | 볼륨 · 방해 금지 시간 · 기본 목소리(Fish 목소리 모델 ID) 동기화 |
 |  `rag_sync_worker` | 300s | 앱에 올라온 사진·추억을 받아 Chroma 증분 갱신 |
 |  `conversation_worker` | 이벤트 | 대화 시작/종료 보고를 순서대로 전송 (앱의 '대화중' 표시) |
 
