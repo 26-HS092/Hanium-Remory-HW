@@ -76,7 +76,7 @@ MED_CONFIRM_DELAY_SEC = 15 * 60
 # 연결 신호를 몇 초마다 보낼지. 서버는 600초 넘게 끊기면 '연결 끊김'으로 본다.
 CONNECTION_INTERVAL_SEC = 300
 # 서버에서 볼륨·방해금지를 몇 초마다 읽어올지
-SETTINGS_SYNC_INTERVAL_SEC = 15
+SETTINGS_SYNC_INTERVAL_SEC = 10
 # 가족 채팅을 몇 초마다 확인할지
 CHAT_CHECK_INTERVAL_SEC = 15
 # 메시지를 읽어드린 뒤 이어서 오는 메시지가 있는지 몇 초 더 지켜볼지.
@@ -90,6 +90,14 @@ REPLY_WAIT_SEC = 8
 # 화면에 '답장하시겠어요? 예/아니오' 를 띄우고 몇 초까지 눌러 주시길 기다릴지.
 # 안 누르시면 답장 안 하시는 걸로 보고 내린다.
 REPLY_ASK_SEC = 20
+# 대화할 때마다 LLM 에 넣는 프롬프트를 터미널에 그대로 찍을지. 끄려면 PRINT_LLM_PROMPT=0
+PRINT_LLM_PROMPT = os.getenv("PRINT_LLM_PROMPT", "1") != "0"
+# 찍은 프롬프트를 임시로 모아 둘 파일. 켤 때마다 비우고 새로 쓴다.
+LLM_PROMPT_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "llm_prompts.log")
+# 답장 말씀을 못 받았을 때 몇 번까지 다시 여쭐지
+REPLY_RETRY_MAX = 2
+# '다시 말씀해 주시겠어요? 예/아니오' 를 몇 초까지 기다릴지
+REPLY_RETRY_ASK_SEC = 10
 # 답장을 보냈다는 카드를 적어도 몇 초 띄워 둘지
 REPLY_RESULT_SEC = 3
 # 가족 사진을 화면에 몇 초 동안 보여줄지
@@ -100,6 +108,9 @@ PHOTO_REPLY_DELAY_SEC = 5
 # 대화 중 꺼낸 기억의 사진은 모리가 답하는 동안만 띄운다. 말이 끝나면 내리고,
 # 혹시 못 내리더라도 이만큼 뒤엔 내려간다.
 MEMORY_PHOTO_MAX_SEC = 15
+# 추억 사진을 한 번 띄우면 그 뒤 몇 턴은 같은 사진을 다시 띄우지 않는다.
+# 다른 사진은 바로 이어 띄워도 된다.
+MEMORY_PHOTO_COOLDOWN_TURNS = 3
 # 어르신 추억(RAG)을 백엔드에서 몇 초마다 동기화할지
 RAG_SYNC_INTERVAL_SEC = 300
 # 스피커 볼륨 조절용 ALSA 컨트롤 이름 (amixer scontrols 로 확인)
@@ -135,7 +146,7 @@ reply_pending = threading.Event()
 MIC_DEVICE_INDEX = None
 
 WAKEWORD_DEVICE_INDEX = None
-WAKEWORD_THRESHOLD = 0.8
+WAKEWORD_THRESHOLD = 0.7
 
 CONVERSATION_IDLE_TIMEOUT_SEC = 15
 
@@ -345,6 +356,21 @@ def format_past_turns(turns: list[dict], now: datetime.datetime | None = None) -
     )
 
 
+def _print_prompt(messages: list[dict]) -> None:
+    """LLM 에 실제로 넘기는 메시지를 그대로 찍고 LLM_PROMPT_LOG 에도 남긴다."""
+    lines = [f"━━━━━━━━━━ 📝 LLM 프롬프트 {datetime.datetime.now():%H:%M:%S} ━━━━━━━━━━"]
+    for m in messages:
+        lines += [f"[{m['role']}]", m["content"], ""]
+    lines.append("━" * 40)
+    out = "\n".join(lines)
+    print(out)
+    try:
+        with open(LLM_PROMPT_LOG, "a", encoding="utf-8") as f:
+            f.write(out + "\n\n")
+    except OSError as e:
+        print(f"⚠️  프롬프트 기록 실패: {e}")
+
+
 def chat_with_memory(client: Groq, user_text: str, context: str,
                      emotion: dict | None = None, hint: str | None = None,
                      mark: str | None = None,
@@ -402,14 +428,17 @@ def chat_with_memory(client: Groq, user_text: str, context: str,
         if m["role"] == "assistant" else m
         for m in (history or [])
     ]
+    messages = [
+        {"role": "system", "content": full_system},
+        *past_msgs,
+        {"role": "user",   "content": user_text},
+    ]
+    if PRINT_LLM_PROMPT:
+        _print_prompt(messages)
     try:
         resp = client.chat.completions.create(
             model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": full_system},
-                *past_msgs,
-                {"role": "user",   "content": user_text},
-            ],
+            messages=messages,
             temperature=0.8,
             max_tokens=1024,
             response_format={"type": "json_object"},
@@ -971,45 +1000,69 @@ def _restore_photo_if_any(face) -> None:
         _show_photo_for_a_while(face, url)
 
 
-class _MemoryPhoto:
-    """이번 답에 곁들일 기억 사진. 모리가 답하는 동안만 띄운다.
+def _find_memory_photo(query: str) -> dict | None:
+    """이번 답에서 보여 드리며 이야기할 추억 사진. 없으면 None."""
+    try:
+        return find_related_photo(PATIENT_ID, query)
+    except Exception as e:
+        print(f"⚠️  관련 사진 찾기 실패: {e}")
+        return None
 
-    사진 찾기(임베딩 검색)는 말을 늦추지 않게 따로 돈다. 그래서 말이 끝난
-    뒤에야 찾을 수도 있는데, 그때는 띄우지 않는다.
+
+def _photo_prompt(photo: dict, mark: str) -> str:
+    """사진을 띄우는 턴에 LLM 에 붙일 안내. 그 사진의 추억을 꺼내 여쭙게 한다.
+
+    추억 글도 가족이 적은 것이라 [관련 기억] 처럼 표식을 끼운다(datamark.py).
     """
+    # 예전에 동기화한 사진엔 추억 원문이 없다. 비전 모델이 쓴 글로 대신한다.
+    story = photo.get("story") or photo["content"]
+    return (
+        "[지금 보여 드리는 사진] 모리가 답하는 동안 화면에 사진 한 장이 뜹니다. "
+        "아래는 가족이 이 사진에 적어 둔 추억입니다.\n"
+        f"   {mark.join(story.split())}\n"
+        "이번 답에서는 이 추억 속 사람·때·곳·일을 하나 이상 구체적으로 꺼내고, "
+        "답의 끝은 〈추억 속 사람〉이랑 〈추억 속 일〉 하셨던 거 기억나세요? 처럼 "
+        "이 기억이 떠오르시는지 다정하게 여쭙는 물음으로 맺으세요. 기억이 난다고 "
+        "모리가 대신 말하지 말고 어르신께 여쭈세요. 질문을 줄이라는 규칙보다 이것이 "
+        "먼저입니다. 다른 기억과 섞지 마세요."
+    )
 
-    def __init__(self, face):
+
+def _photo_followup_prompt(photo: dict, mark: str) -> str:
+    """사진을 보여 드린 다음 턴에 붙일 안내. 기억이 안 나신다고 하셔도 이어 간다."""
+    story = photo.get("story") or photo["content"]
+    return (
+        "[방금 보여 드린 사진] 바로 앞 답에서 아래 추억을 보여 드리며 기억나시는지 "
+        "여쭸습니다. 가족이 적어 둔 추억입니다.\n"
+        f"   {mark.join(story.split())}\n"
+        "어르신이 기억난다고 하시면 반가워하며 맞장구치고, 그때 이야기를 더 "
+        "들려 달라고 하세요. 기억이 안 난다고 하시면 괜찮아요, 그때 〈추억 속 사람〉이랑 "
+        "〈추억 속 곳〉에서 〈추억 속 일〉 하셨대요 처럼 이 추억을 옛날이야기 들려 드리듯 "
+        "짧고 다정하게 알려 드리세요. 모리는 이 추억을 알고 있으니 가물가물하다거나 "
+        "같이 떠올려 보자고 하지 말고, 다시 묻거나 시험하지 마세요. "
+        "다른 이야기를 하시면 그 이야기를 따라가세요."
+    )
+
+
+class _MemoryPhoto:
+    """이번 답에 곁들일 추억 사진. 모리가 답하는 동안만 띄운다."""
+
+    def __init__(self, face, photo: dict):
         self.face = face
-        self._lock = threading.Lock()
+        self.photo = photo
         self._seq: int | None = None
-        self._done = False
 
-    def find_and_show(self, query: str) -> None:
-        """관련도가 높은 사진이 있으면 띄운다. 못 찾으면 아무것도 안 띄운다."""
-        try:
-            photo = find_related_photo(PATIENT_ID, query)
-        except Exception as e:
-            print(f"⚠️  관련 사진 찾기 실패: {e}")
-            return
-        if not photo:
-            return
-        with self._lock:
-            if self._done:
-                print("🖼️  관련 사진을 찾았지만 답이 이미 끝나 띄우지 않음")
-                return
-            print(f"🖼️  관련 사진 표시(유사도 {photo['similarity']:.2f}): "
-                  f"{photo['content'][:30]}")
-            self._seq = _show_photo_for_a_while(
-                self.face, photo["url"], MEMORY_PHOTO_MAX_SEC
-            )
+    def show(self) -> None:
+        print(f"🖼️  관련 사진 표시(유사도 {self.photo['similarity']:.2f}): "
+              f"{(self.photo.get('story') or self.photo['content'])[:30]}")
+        self._seq = _show_photo_for_a_while(
+            self.face, self.photo["url"], MEMORY_PHOTO_MAX_SEC
+        )
 
     def finish(self) -> None:
         """답이 끝났다. 띄운 사진이 아직 그대로면 내린다(그 사이 온 가족 사진은 둔다)."""
-        with self._lock:
-            self._done = True
-            seq = self._seq
-        if seq is not None:
-            _expire_photo(self.face, seq)
+        if self._seq is not None:
+            _expire_photo(self.face, self._seq)
 
 
 def _sender_label(m: dict) -> str:
@@ -1116,6 +1169,37 @@ def post_elder_reply(text: str, wav_path: str | None = None) -> bool:
         return False
 
 
+def _record_reply(prompt: str, mic_wav: str, face=None) -> str | None:
+    """안내 말씀을 드리고 답장을 녹음한다. 말씀이 없으면 None."""
+    # 안내는 듣는 동안에도 띄워 둔다. 안내나 사진이 얼굴을 덮으면 듣는 중
+    # 전구가 안 보여서, 지금 말씀하시면 된다는 걸 글로라도 알려야 한다.
+    if face:
+        face.show_notice("말씀해 주세요", "가족 대화방에 보낼 답장", icon="message")
+    try:
+        with speaker_lock:
+            # 목소리가 그대로 간다는 걸 미리 말씀드린다.
+            speak(prompt)
+
+        recorder = LiveRecorder(
+            input_device_index=MIC_DEVICE_INDEX,
+            silence_end_ms=MIC_SILENCE_END_MS,
+        )
+        recording.set()
+        if face:
+            face.listen_start()
+        try:
+            return recorder.record_until_silence(
+                mic_wav, max_wait_seconds=REPLY_WAIT_SEC
+            )
+        finally:
+            recording.clear()
+            if face:
+                face.listen_stop()
+    finally:
+        if face:
+            face.hide_notice()
+
+
 def listen_for_reply(req: dict, stt, mic_wav: str, face=None) -> None:
     """가족 메시지를 읽어드린 뒤 답장을 여쭙고, 말씀하시면 대화방에 올린다.
 
@@ -1149,51 +1233,40 @@ def listen_for_reply(req: dict, stt, mic_wav: str, face=None) -> None:
             "목소리 그대로 보내드릴게요."
         )
 
-    # 안내는 듣는 동안에도 띄워 둔다. 안내나 사진이 얼굴을 덮으면 듣는 중
-    # 전구가 안 보여서, 지금 말씀하시면 된다는 걸 글로라도 알려야 한다.
-    if face:
-        face.show_notice("말씀해 주세요", "가족 대화방에 보낼 답장", icon="message")
-    try:
-        with speaker_lock:
-            # 목소리가 그대로 간다는 걸 미리 말씀드린다.
-            speak(prompt)
+    # 말씀을 못 받았으면(소리가 없거나 받아 적은 글이 비면) 다시 할지 여쭙는다.
+    # 잘 받았으면 묻지 않고 바로 보낸다. 끝없이 되묻지 않게 횟수를 둔다.
+    for attempt in range(1 + REPLY_RETRY_MAX):
+        wav_path = _record_reply(prompt, mic_wav, face)
+        text = ""
+        if wav_path is not None:
+            _think_start(face)   # 받아 적는 동안
+            text, _ = stt.transcribe(wav_path)
+            text = (text or "").strip()
+            _think_stop(face)
+        print(f"💌 어르신 답장: {text or '못 받음'}")
+        if text:
+            break
 
-        recorder = LiveRecorder(
-            input_device_index=MIC_DEVICE_INDEX,
-            silence_end_ms=MIC_SILENCE_END_MS,
-        )
-        recording.set()
-        if face:
-            face.listen_start()
-        try:
-            wav_path = recorder.record_until_silence(
-                mic_wav, max_wait_seconds=REPLY_WAIT_SEC
-            )
-        finally:
-            recording.clear()
+        if not (face and face.has_screen()) and wav_path is None:
+            return            # 화면 없이 말씀도 없으셨으면 예전처럼 조용히 넘어간다
+        if attempt == REPLY_RETRY_MAX or not (face and face.has_screen()):
+            with speaker_lock:
+                speak("말씀을 잘 못 알아들었어요. 다음에 다시 해 주세요.")
             if face:
-                face.listen_stop()
-    finally:
-        if face:
-            face.hide_notice()
-
-    if wav_path is None:
-        print("💌 답장 없음")
-        if face:
-            _restore_photo_if_any(face)
-        return
-
-    _think_start(face)   # 받아 적고 올리는 동안
-    text, _ = stt.transcribe(wav_path)
-    text = (text or "").strip()
-    print(f"💌 어르신 답장: {text}")
-    if not text:
-        _think_stop(face)
+                _restore_photo_if_any(face)
+            return
+        ask_id = face.ask_show("제대로 듣지 못했어요", "다시 말씀해 주시겠어요?")
         with speaker_lock:
-            speak("말씀을 잘 못 알아들었어요. 다음에 다시 해 주세요.")
-        if face:
+            speak("제대로 듣지 못했어요. 다시 한번 말씀해 주시겠어요?")
+        answer = face.ask_wait(ask_id, timeout=REPLY_RETRY_ASK_SEC)
+        print(f"💌 다시 말씀하실지: {answer or '응답 없음'}")
+        if answer != "yes":
+            if answer == "no":
+                with speaker_lock:
+                    speak("네, 알겠어요.")
             _restore_photo_if_any(face)
-        return
+            return
+        prompt = "네, 말씀해 주세요."
 
     # 답장에도 힘든 마음이 담길 수 있다. 대화와 같은 기준으로 알린다.
     risk = safety.classify(text)
@@ -1202,6 +1275,7 @@ def listen_for_reply(req: dict, stt, mic_wav: str, face=None) -> None:
             target=report_safety, args=(risk.kind, text), daemon=True
         ).start()
 
+    _think_start(face)   # 올리는 동안
     sent = post_elder_reply(text, wav_path)
     _think_stop(face)
     _tell_reply_result(sent, face)
@@ -1521,6 +1595,11 @@ def main() -> None:
         presence.on_change(lambda here: tracker.resume() if here else tracker.pause())
 
     groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    if PRINT_LLM_PROMPT:
+        # 임시 기록이라 켤 때마다 비운다. 끝없이 쌓이지 않게.
+        os.makedirs(os.path.dirname(LLM_PROMPT_LOG), exist_ok=True)
+        open(LLM_PROMPT_LOG, "w", encoding="utf-8").close()
+        print(f"📝 LLM 프롬프트 기록: {LLM_PROMPT_LOG}")
 
     # RAG 초기 동기화(백엔드 데이터로 chroma 생성) → 그 다음 워밍업.
     vision_model = _make_vision_model()
@@ -1581,6 +1660,12 @@ def main() -> None:
     turns_this_session = 0
     # 이번 대화에서 주고받은 말(LLM messages 형식). 웨이크워드마다 새로 시작한다.
     history: list[dict] = []
+    # 바로 앞 턴에 보여 드린 추억 사진. 다음 턴에 그 추억을 이어 말한다.
+    photo_followup: dict | None = None
+    # 마지막에 띄운 사진과, 그 사진을 다시 띄우지 않고 쉴 남은 턴 수
+    # (MEMORY_PHOTO_COOLDOWN_TURNS).
+    photo_cooldown_id: str | None = None
+    photo_cooldown = 0
     # 그 전 대화들의 기록. 웨이크워드마다 대화 로그에서 다시 읽는다.
     past_block = ""
 
@@ -1634,6 +1719,8 @@ def main() -> None:
                 conversation_active = True
                 turns_this_session = 0
                 history = []
+                photo_followup = None
+                photo_cooldown_id, photo_cooldown = None, 0
                 # 이번 대화는 새로 시작하지만, 앞선 대화에서 하신 말은 기억해 둔다.
                 past_block = format_past_turns(
                     conv_logger.recent_turns(days=PAST_DAYS, limit=PAST_TURNS)
@@ -1777,6 +1864,27 @@ def main() -> None:
                 except Exception as e:
                     print(f"⚠️  RAG 검색 실패(데이터 없음?): {e}")
                     context = ""
+                # 이어지는 추억 사진이 있으면 답하는 동안 띄우고, 그 추억을 꺼내
+                # "이 기억 떠오르세요?" 하고 여쭙게 한다. 말과 사진이 같은 추억에서
+                # 나오도록 LLM 보다 먼저 고른다. 위험 신호가 있는 턴엔 꺼내지 않는다.
+                memory_photo = None
+                followup, photo_followup = photo_followup, None
+                resting_id = photo_cooldown_id if photo_cooldown > 0 else None
+                photo_cooldown = max(0, photo_cooldown - 1)
+                if face and context and not risk:
+                    photo = _find_memory_photo(rag_query)
+                    # 얼마 전에 띄운 사진이 또 잡혔으면 띄우지 않는다. 다른 사진은 띄운다.
+                    if photo and photo["memory_id"] == resting_id:
+                        print(f"🖼️  같은 사진이라 쉼(남은 {photo_cooldown}턴): {resting_id}")
+                    elif photo:
+                        memory_photo = _MemoryPhoto(face, photo)
+                    # 방금 보여 드린 사진이 또 잡혔으면 처음처럼 다시 여쭙지 않고
+                    # 그 추억을 말로 이어 간다.
+                    if followup and (not photo
+                                     or photo["memory_id"] == followup["memory_id"]):
+                        context += "\n\n" + _photo_followup_prompt(followup, mark)
+                    elif memory_photo:
+                        context += "\n\n" + _photo_prompt(photo, mark)
 
             # ④ LLM. 자해만 거치지 않는다 — 무슨 말이 나올지 모르는 채로 둘 수
             #    없는 순간이고, 그보다 급한 판정은 없어서 LLM 에 물을 것도 없다.
@@ -1815,16 +1923,15 @@ def main() -> None:
                     reply, robot_expr = risk.reply, risk.expression
             print(f"🐻 모리: {reply}    [표정: {robot_expr}]")
 
-            # 저장된 기억을 꺼내 말했으면 그와 관련된 사진을 답하는 동안 보여드린다.
-            # 안전 신호가 걸린 턴엔 띄우지 않는다.
-            memory_photo = None
-            if (face and used_memory and not risk
-                    and context.startswith("[관련 기억]")):
-                memory_photo = _MemoryPhoto(face)
-                threading.Thread(
-                    target=memory_photo.find_and_show, args=(f"{user_text} {reply}",),
-                    daemon=True,
-                ).start()
+            # 고른 추억 사진은 답하는 동안 보여 드린다. LLM 이 위험 신호를 더 급하게
+            # 봤거나 그 추억을 꺼내지 않았으면 띄우지 않는다.
+            if memory_photo and (risk or not used_memory):
+                memory_photo = None
+            if memory_photo:
+                memory_photo.show()
+                photo_followup = memory_photo.photo
+                photo_cooldown_id = memory_photo.photo["memory_id"]
+                photo_cooldown = MEMORY_PHOTO_COOLDOWN_TURNS
 
             # 말이 나가는 걸 늦추지 않도록 따로 보낸다.
             turns_this_session += 1
