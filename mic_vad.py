@@ -126,7 +126,7 @@ class LiveRecorder:
         vad_aggressiveness: int = 2,
         silence_end_ms: int = 1500,
         max_record_seconds: int = 10,
-        min_energy_threshold: float = 300.0,
+        min_energy_threshold: float = 500.0,
         input_device_index: int | None = None,
     ):
         self.rate = rate
