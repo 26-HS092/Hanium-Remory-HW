@@ -30,6 +30,9 @@ MANIFEST_FILE = RAG_DIR / "rag_manifest.json"        # {chroma_id: 내용해시}
 # 주소는 만료되므로 chroma 메타데이터(글이 바뀔 때만 다시 씀)가 아니라 여기에
 # 동기화 때마다 새로 쓴다.
 PHOTO_URL_FILE = RAG_DIR / "photo_urls.json"
+# 앱에서 지울 수 없는 추억을 인형 쪽에서만 빼 둘 memoryId 목록(JSON 배열).
+# 동기화마다 다시 읽으므로 고친 뒤 재시작하지 않아도 다음 동기화부터 빠진다.
+EXCLUDE_FILE   = RAG_DIR / "excluded_memories.json"
 
 
 def _load_json(path: Path) -> dict:
@@ -128,10 +131,16 @@ def _photo_doc(memory: dict, patient_name: str, patient_id: str, vision_model, c
         cache[mid] = pm
 
     text = pm["content"]
+    # 비전 모델이 다시 쓴 글(text)과 별개로, 가족이 적은 추억 원문을 남겨 둔다.
+    # 사진을 띄울 때 모리가 이 추억을 꺼내 "이 기억 떠오르세요?" 하고 여쭌다.
+    story = " ".join(
+        x for x in [memory.get("title"), memory.get("period"), memory.get("description")] if x
+    ).strip()
     meta = {
         "memory_id": f"photo_{mid}", "patient_id": patient_id, "patient_name": patient_name,
         "category": "photo", "importance": pm["importance"], "source_type": "photo",
         "source_file": pm["source"], "keywords": pm["keywords"], "trigger_phrases": pm["trigger_phrases"],
+        "story": story,
     }
     return f"photo_{mid}", text, meta
 
@@ -156,6 +165,11 @@ def sync_rag(patient_id: str, api_base: str, device_id, device_token: str,
     patient_name = user.get("name") or "어르신"
     family = data.get("family") or []
     memories = data.get("memories") or []
+    try:
+        excluded = {str(x) for x in json.loads(EXCLUDE_FILE.read_text(encoding="utf-8"))}
+    except Exception:
+        excluded = set()
+    memories = [m for m in memories if str(m.get("memoryId")) not in excluded]
     _save_json(PHOTO_URL_FILE, {
         f"photo_{m.get('memoryId')}": m["imageUrl"] for m in memories if m.get("imageUrl")
     })
@@ -168,7 +182,9 @@ def sync_rag(patient_id: str, api_base: str, device_id, device_token: str,
         docs[cid] = {"text": text, "metadata": _clean_meta(meta), "hash": _hash(text)}
     for m in memories:
         cid, text, meta = _photo_doc(m, patient_name, patient_id, vision_model, cache)
-        docs[cid] = {"text": text, "metadata": _clean_meta(meta), "hash": _hash(text)}
+        # 추억 글만 고쳐도 다시 넣도록 해시에 함께 넣는다.
+        docs[cid] = {"text": text, "metadata": _clean_meta(meta),
+                     "hash": _hash(text + "\n" + meta["story"])}
     _save_json(CACHE_FILE, cache)
 
     if not docs:
