@@ -1,7 +1,11 @@
 """위험 발화 탐지 평가 (논문 표 3).
 
-    GROQ_API_KEY=... python eval_safety.py eval_set.csv          # 전체
+    python eval_safety.py eval_set.csv                            # 전체
+    LLM_ENGINE=claude python eval_safety.py eval_set.csv          # Claude 로
     python eval_safety.py eval_set.csv --no-llm                   # 규칙·어휘만
+
+LLM 엔진·모델은 main.py 와 같이 .env 의 LLM_ENGINE·CLAUDE_MODEL 을 따른다
+(groq 면 GROQ_API_KEY, claude 면 ANTHROPIC_API_KEY). 판정 캐시는 모델마다 따로 쌓는다.
 
 CSV 열: text,label,type
   label  none|self_harm|harm_others|medical|abuse
@@ -62,23 +66,64 @@ def lexical(text: str) -> str | None:
 
 
 # ── LLM: main.py 의 호출을 그대로 쓴다 ────────────────
+# main.py 를 import 하면 마이크·카메라까지 잡으므로, LLM 호출에 쓰는 것만 떼어 온다.
+_KEEP_NAMES = {
+    "LLM_ENGINE", "GROQ_MODEL", "CLAUDE_MODEL", "CLAUDE_EFFORT",
+    "SYSTEM_PROMPT", "ROBOT_EXPRESSIONS", "_REPLY_SCHEMA",
+    "_QUOTE_CHARS", "_WEEKDAYS_KO",
+}
+_KEEP_FUNCS = {
+    "chat_with_memory", "_ask_groq", "_ask_claude", "_failed_generation",
+    "_tidy_reply", "_first_sentences", "format_now", "_korean_time",
+}
+
+
 def load_chat():
+    """main.py 의 chat_with_memory 와, .env 로 고른 엔진·모델 이름을 준다."""
+    import datetime
+    from dotenv import load_dotenv
+    from groq import Groq, BadRequestError
+    from datamark import strip_marks, instruction as datamark_instruction
+
+    load_dotenv(HERE / ".env")   # main.py 처럼 LLM_ENGINE·CLAUDE_MODEL 을 .env 에서 읽는다
     src = (HERE / "main.py").read_text(encoding="utf-8")
-    keep = {"SYSTEM_PROMPT", "GROQ_MODEL", "ROBOT_EXPRESSIONS"}
     nodes = []
     for n in ast.parse(src).body:
         if isinstance(n, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id in keep for t in n.targets
+            isinstance(t, ast.Name) and t.id in _KEEP_NAMES for t in n.targets
         ):
             nodes.append(n)
-        elif isinstance(n, ast.FunctionDef) and n.name == "chat_with_memory":
+        elif isinstance(n, ast.FunctionDef) and n.name in _KEEP_FUNCS:
             nodes.append(n)
-    ns = {"safety": safety, "Groq": object}
+    ns = {
+        "os": os, "re": re, "json": json, "datetime": datetime, "safety": safety,
+        "Groq": Groq, "BadRequestError": BadRequestError,
+        "strip_marks": strip_marks, "datamark_instruction": datamark_instruction,
+        "PRINT_LLM_PROMPT": False,
+    }
     exec(compile(ast.Module(nodes, []), "main.py", "exec"), ns)
-    return ns["chat_with_memory"], ns["GROQ_MODEL"]
+    engine = ns["LLM_ENGINE"]
+    model = ns["CLAUDE_MODEL"] if engine == "claude" else ns["GROQ_MODEL"]
+    return ns["chat_with_memory"], engine, model
 
 
-def llm_judgements(texts: list[str], cache_path: Path) -> dict[str, list[dict]]:
+def make_client(engine: str):
+    if engine == "claude":
+        import anthropic
+        return anthropic.Anthropic()   # ANTHROPIC_API_KEY 를 읽는다
+    from groq import Groq
+    return Groq(api_key=os.environ["GROQ_API_KEY"])
+
+
+def default_cache(model: str) -> Path:
+    """모델마다 판정을 따로 쌓는다. 섞이면 어느 모델 결과인지 알 수 없다."""
+    if model == "openai/gpt-oss-120b":
+        return HERE / "eval_llm_cache.jsonl"   # 예전부터 쌓아 둔 Groq 판정
+    return HERE / f"eval_llm_cache_{re.sub(r'[^0-9A-Za-z.-]', '_', model)}.jsonl"
+
+
+def llm_judgements(texts: list[str], cache_path: Path, chat, engine: str,
+                   model: str) -> dict[str, list[dict]]:
     """문장마다 RUNS 개의 {risk, fail} 를 준다. fail 은 호출 실패·형식 오류."""
     got: dict[str, list[dict]] = defaultdict(list)
     if cache_path.exists():
@@ -90,10 +135,8 @@ def llm_judgements(texts: list[str], cache_path: Path) -> dict[str, list[dict]]:
     if not todo:
         return got
 
-    from groq import Groq
-    chat, model = load_chat()
-    client = Groq(api_key=os.environ["GROQ_API_KEY"])
-    print(f"LLM 호출 {len(todo)}회 ({model})", file=sys.stderr)
+    client = make_client(engine)
+    print(f"LLM 호출 {len(todo)}회 ({engine}: {model})", file=sys.stderr)
 
     with cache_path.open("a", encoding="utf-8") as f:
         for n, (text, run) in enumerate(todo, 1):
@@ -157,7 +200,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("csv")
     ap.add_argument("--no-llm", action="store_true")
-    ap.add_argument("--cache", default=str(HERE / "eval_llm_cache.jsonl"))
+    ap.add_argument("--cache", help="판정 캐시 파일. 기본은 모델마다 따로")
     args = ap.parse_args()
 
     rows = list(csv.DictReader(open(args.csv, encoding="utf-8")))
@@ -167,7 +210,10 @@ def main():
         llm = {t: [{"risk": None, "fail": True}] for t in texts}
         conds = {k: v for k, v in CONDITIONS.items() if k in NO_LLM}
     else:
-        llm = llm_judgements(texts, Path(args.cache))
+        chat, engine, model = load_chat()
+        cache = Path(args.cache) if args.cache else default_cache(model)
+        print(f"판정 캐시: {cache.name}", file=sys.stderr)
+        llm = llm_judgements(texts, cache, chat, engine, model)
         conds = CONDITIONS
 
     groups = {
