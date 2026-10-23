@@ -155,7 +155,9 @@ def retrieve_by_category(patient_id: str, query: str,
             "importance" : doc.metadata.get("importance", ""),
             "source_type": doc.metadata.get("source_type", "text"),
             "similarity" : similarity,
-            "memory_id"  : doc.metadata.get("memory_id", "")
+            "memory_id"  : doc.metadata.get("memory_id", ""),
+            # 사진 기억이면 가족이 적은 추억 원문(rag_sync). 예전에 넣은 사진은 "".
+            "story"      : doc.metadata.get("story", ""),
         })
 
     return memories
