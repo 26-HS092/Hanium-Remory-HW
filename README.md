@@ -158,7 +158,7 @@ Flutter 앱으로 어르신 상태를 보고,
 | **얼굴 트래킹** | Pi 카메라 + YOLOv8 포즈 `.hef` + 아두이노 팬틸트 | Hailo 에서 사람·관절을 찾아 머리 쪽으로 돌림 · 못 열면 Pixy2 팬틸트 + YuNet |
 | **RAG** | Chroma + `jhgan/ko-sroberta-multitask` | 안정 ID 기반 증분 동기화 (사진 수백 장도 빠름) |
 | **비전 분석** | Gemini 2.5 Flash (선택) | 사진 → 기억 텍스트. 꺼두면 보호자 설명을 그대로 사용 |
-| **LLM** | Groq (`openai/gpt-oss-120b`) | JSON 모드로 `reply` + `expression` 동시 생성 |
+| **LLM** | Groq (`openai/gpt-oss-120b`) · `LLM_ENGINE=claude` 면 Claude (`claude-haiku-5-5`) | JSON 으로 `reply` + `expression` 동시 생성 · Claude 는 고정 프롬프트를 캐시 |
 | **TTS** | Fish Audio 스트리밍 (`TTS_ENGINE=cosyvoice` 면 CosyVoice2) | 앱에서 고른 Fish 목소리 모델로 말함 · 예전 CosyVoice 목소리면 `FISH_REFERENCE_ID` |
 | **얼굴 표시** | WebSocket(8765) → Chromium kiosk + SVG | 표정 6종 · 말할 때 입 움직임 · 웨이크워드 전구 · 알림 카드(약·메시지) · 사진 오버레이 |
 | **오디오 출력** | ALSA `aplay` (`plughw:CARD=UACDemoV10`) | 볼륨은 `amixer` 로 서버 설정값 반영 |
@@ -236,7 +236,7 @@ cd Hanium-Remory-HW
 python3 -m venv .venv --system-site-packages   # picamera2/hailo 시스템 패키지 사용
 source .venv/bin/activate
 pip install numpy sounddevice pyaudio webrtcvad onnxruntime openwakeword soundfile \
-            requests python-dotenv groq websockets opencv-python hsemotion-onnx \
+            requests python-dotenv groq anthropic websockets opencv-python hsemotion-onnx \
             langchain-chroma langchain-huggingface google-genai pyserial
 ```
 
@@ -260,6 +260,10 @@ HSEmotion 모델이 `models/` 에 없으면 첫 실행 때 `~/.hsemotion/` 로 �
 
 ```bash
 GROQ_API_KEY=...                  # 대화 생성
+# LLM_ENGINE=claude               # 기본 groq. claude 면 아래 키 사용
+# ANTHROPIC_API_KEY=...
+# CLAUDE_MODEL=claude-haiku-5-5   # 기본값
+# CLAUDE_EFFORT=low               # low|medium|high. 높을수록 느리고 깊게 생각
 GEMINI_API_KEY=...                # (선택) 사진 비전 분석
 RAG_USE_VISION=false              # true 로 켜면 사진을 Gemini 로 분석
 
