@@ -90,6 +90,14 @@ REPLY_WAIT_SEC = 8
 # 화면에 '답장하시겠어요? 예/아니오' 를 띄우고 몇 초까지 눌러 주시길 기다릴지.
 # 안 누르시면 답장 안 하시는 걸로 보고 내린다.
 REPLY_ASK_SEC = 20
+# 대화할 때마다 LLM 에 넣는 프롬프트를 터미널에 그대로 찍을지. 끄려면 PRINT_LLM_PROMPT=0
+PRINT_LLM_PROMPT = os.getenv("PRINT_LLM_PROMPT", "1") != "0"
+# 찍은 프롬프트를 임시로 모아 둘 파일. 켤 때마다 비우고 새로 쓴다.
+LLM_PROMPT_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "llm_prompts.log")
+# 답장 말씀을 못 받았을 때 몇 번까지 다시 여쭐지
+REPLY_RETRY_MAX = 2
+# '다시 말씀해 주시겠어요? 예/아니오' 를 몇 초까지 기다릴지
+REPLY_RETRY_ASK_SEC = 10
 # 답장을 보냈다는 카드를 적어도 몇 초 띄워 둘지
 REPLY_RESULT_SEC = 3
 # 가족 사진을 화면에 몇 초 동안 보여줄지
@@ -348,6 +356,21 @@ def format_past_turns(turns: list[dict], now: datetime.datetime | None = None) -
     )
 
 
+def _print_prompt(messages: list[dict]) -> None:
+    """LLM 에 실제로 넘기는 메시지를 그대로 찍고 LLM_PROMPT_LOG 에도 남긴다."""
+    lines = [f"━━━━━━━━━━ 📝 LLM 프롬프트 {datetime.datetime.now():%H:%M:%S} ━━━━━━━━━━"]
+    for m in messages:
+        lines += [f"[{m['role']}]", m["content"], ""]
+    lines.append("━" * 40)
+    out = "\n".join(lines)
+    print(out)
+    try:
+        with open(LLM_PROMPT_LOG, "a", encoding="utf-8") as f:
+            f.write(out + "\n\n")
+    except OSError as e:
+        print(f"⚠️  프롬프트 기록 실패: {e}")
+
+
 def chat_with_memory(client: Groq, user_text: str, context: str,
                      emotion: dict | None = None, hint: str | None = None,
                      mark: str | None = None,
@@ -405,14 +428,17 @@ def chat_with_memory(client: Groq, user_text: str, context: str,
         if m["role"] == "assistant" else m
         for m in (history or [])
     ]
+    messages = [
+        {"role": "system", "content": full_system},
+        *past_msgs,
+        {"role": "user",   "content": user_text},
+    ]
+    if PRINT_LLM_PROMPT:
+        _print_prompt(messages)
     try:
         resp = client.chat.completions.create(
             model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": full_system},
-                *past_msgs,
-                {"role": "user",   "content": user_text},
-            ],
+            messages=messages,
             temperature=0.8,
             max_tokens=1024,
             response_format={"type": "json_object"},
@@ -1143,6 +1169,37 @@ def post_elder_reply(text: str, wav_path: str | None = None) -> bool:
         return False
 
 
+def _record_reply(prompt: str, mic_wav: str, face=None) -> str | None:
+    """안내 말씀을 드리고 답장을 녹음한다. 말씀이 없으면 None."""
+    # 안내는 듣는 동안에도 띄워 둔다. 안내나 사진이 얼굴을 덮으면 듣는 중
+    # 전구가 안 보여서, 지금 말씀하시면 된다는 걸 글로라도 알려야 한다.
+    if face:
+        face.show_notice("말씀해 주세요", "가족 대화방에 보낼 답장", icon="message")
+    try:
+        with speaker_lock:
+            # 목소리가 그대로 간다는 걸 미리 말씀드린다.
+            speak(prompt)
+
+        recorder = LiveRecorder(
+            input_device_index=MIC_DEVICE_INDEX,
+            silence_end_ms=MIC_SILENCE_END_MS,
+        )
+        recording.set()
+        if face:
+            face.listen_start()
+        try:
+            return recorder.record_until_silence(
+                mic_wav, max_wait_seconds=REPLY_WAIT_SEC
+            )
+        finally:
+            recording.clear()
+            if face:
+                face.listen_stop()
+    finally:
+        if face:
+            face.hide_notice()
+
+
 def listen_for_reply(req: dict, stt, mic_wav: str, face=None) -> None:
     """가족 메시지를 읽어드린 뒤 답장을 여쭙고, 말씀하시면 대화방에 올린다.
 
@@ -1176,51 +1233,40 @@ def listen_for_reply(req: dict, stt, mic_wav: str, face=None) -> None:
             "목소리 그대로 보내드릴게요."
         )
 
-    # 안내는 듣는 동안에도 띄워 둔다. 안내나 사진이 얼굴을 덮으면 듣는 중
-    # 전구가 안 보여서, 지금 말씀하시면 된다는 걸 글로라도 알려야 한다.
-    if face:
-        face.show_notice("말씀해 주세요", "가족 대화방에 보낼 답장", icon="message")
-    try:
-        with speaker_lock:
-            # 목소리가 그대로 간다는 걸 미리 말씀드린다.
-            speak(prompt)
+    # 말씀을 못 받았으면(소리가 없거나 받아 적은 글이 비면) 다시 할지 여쭙는다.
+    # 잘 받았으면 묻지 않고 바로 보낸다. 끝없이 되묻지 않게 횟수를 둔다.
+    for attempt in range(1 + REPLY_RETRY_MAX):
+        wav_path = _record_reply(prompt, mic_wav, face)
+        text = ""
+        if wav_path is not None:
+            _think_start(face)   # 받아 적는 동안
+            text, _ = stt.transcribe(wav_path)
+            text = (text or "").strip()
+            _think_stop(face)
+        print(f"💌 어르신 답장: {text or '못 받음'}")
+        if text:
+            break
 
-        recorder = LiveRecorder(
-            input_device_index=MIC_DEVICE_INDEX,
-            silence_end_ms=MIC_SILENCE_END_MS,
-        )
-        recording.set()
-        if face:
-            face.listen_start()
-        try:
-            wav_path = recorder.record_until_silence(
-                mic_wav, max_wait_seconds=REPLY_WAIT_SEC
-            )
-        finally:
-            recording.clear()
+        if not (face and face.has_screen()) and wav_path is None:
+            return            # 화면 없이 말씀도 없으셨으면 예전처럼 조용히 넘어간다
+        if attempt == REPLY_RETRY_MAX or not (face and face.has_screen()):
+            with speaker_lock:
+                speak("말씀을 잘 못 알아들었어요. 다음에 다시 해 주세요.")
             if face:
-                face.listen_stop()
-    finally:
-        if face:
-            face.hide_notice()
-
-    if wav_path is None:
-        print("💌 답장 없음")
-        if face:
-            _restore_photo_if_any(face)
-        return
-
-    _think_start(face)   # 받아 적고 올리는 동안
-    text, _ = stt.transcribe(wav_path)
-    text = (text or "").strip()
-    print(f"💌 어르신 답장: {text}")
-    if not text:
-        _think_stop(face)
+                _restore_photo_if_any(face)
+            return
+        ask_id = face.ask_show("제대로 듣지 못했어요", "다시 말씀해 주시겠어요?")
         with speaker_lock:
-            speak("말씀을 잘 못 알아들었어요. 다음에 다시 해 주세요.")
-        if face:
+            speak("제대로 듣지 못했어요. 다시 한번 말씀해 주시겠어요?")
+        answer = face.ask_wait(ask_id, timeout=REPLY_RETRY_ASK_SEC)
+        print(f"💌 다시 말씀하실지: {answer or '응답 없음'}")
+        if answer != "yes":
+            if answer == "no":
+                with speaker_lock:
+                    speak("네, 알겠어요.")
             _restore_photo_if_any(face)
-        return
+            return
+        prompt = "네, 말씀해 주세요."
 
     # 답장에도 힘든 마음이 담길 수 있다. 대화와 같은 기준으로 알린다.
     risk = safety.classify(text)
@@ -1229,6 +1275,7 @@ def listen_for_reply(req: dict, stt, mic_wav: str, face=None) -> None:
             target=report_safety, args=(risk.kind, text), daemon=True
         ).start()
 
+    _think_start(face)   # 올리는 동안
     sent = post_elder_reply(text, wav_path)
     _think_stop(face)
     _tell_reply_result(sent, face)
@@ -1548,6 +1595,11 @@ def main() -> None:
         presence.on_change(lambda here: tracker.resume() if here else tracker.pause())
 
     groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    if PRINT_LLM_PROMPT:
+        # 임시 기록이라 켤 때마다 비운다. 끝없이 쌓이지 않게.
+        os.makedirs(os.path.dirname(LLM_PROMPT_LOG), exist_ok=True)
+        open(LLM_PROMPT_LOG, "w", encoding="utf-8").close()
+        print(f"📝 LLM 프롬프트 기록: {LLM_PROMPT_LOG}")
 
     # RAG 초기 동기화(백엔드 데이터로 chroma 생성) → 그 다음 워밍업.
     vision_model = _make_vision_model()
