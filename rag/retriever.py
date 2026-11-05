@@ -10,6 +10,8 @@ import os
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 
+from rag_sync import display_photo_path
+
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 DB_DIR          = "./chroma_db"
@@ -66,6 +68,21 @@ def _load_db(patient_id: str) -> Chroma:
     return db
 
 
+_last_query = (None, None)   # (문장, 임베딩) — 같은 턴에 기억·사진을 따로 찾을 때 한 번만 임베딩
+
+
+def _search(vectordb: Chroma, query: str, k: int, filter: dict | None = None):
+    """similarity_search_with_score 와 같은 (doc, distance) 목록.
+
+    임베딩이 Pi CPU 에서 0.5초쯤 걸려서, 바로 전과 같은 문장이면 다시 계산하지 않는다.
+    """
+    global _last_query
+    if _last_query[0] != query:
+        _last_query = (query, _get_embeddings().embed_query(query))
+    return vectordb.similarity_search_by_vector_with_relevance_scores(
+        _last_query[1], k=k, filter=filter)
+
+
 # ── LLM 담당자가 사용할 메인 함수 ─────────────────────────────────────────────
 
 def retrieve_memories(patient_id: str, query: str, top_k: int = 3) -> list[dict]:
@@ -99,10 +116,7 @@ def retrieve_memories(patient_id: str, query: str, top_k: int = 3) -> list[dict]
     vectordb = _load_db(patient_id)
 
     # 거리 점수와 함께 검색 (distance: 낮을수록 유사 → 1-distance로 유사도 변환)
-    results = vectordb.similarity_search_with_score(
-        query=query,
-        k=top_k
-    )
+    results = _search(vectordb, query, top_k)
 
     memories = []
     for doc, distance in results:
@@ -140,11 +154,7 @@ def retrieve_by_category(patient_id: str, query: str,
     """
     vectordb = _load_db(patient_id)
 
-    results = vectordb.similarity_search_with_score(
-        query=query,
-        k=top_k,
-        filter={"category": category}
-    )
+    results = _search(vectordb, query, top_k, filter={"category": category})
 
     memories = []
     for doc, distance in results:
@@ -174,11 +184,7 @@ def retrieve_high_importance(patient_id: str, query: str,
     """
     vectordb = _load_db(patient_id)
 
-    results = vectordb.similarity_search_with_score(
-        query=query,
-        k=top_k,
-        filter={"importance": "high"}
-    )
+    results = _search(vectordb, query, top_k, filter={"importance": "high"})
 
     memories = []
     for doc, distance in results:
@@ -220,6 +226,11 @@ def find_related_photo(patient_id: str, query: str) -> dict | None:
         url = None
     if not url:
         return None
+    # 동기화 때 받아 둔 화면용 사진이 있으면 그걸 띄운다(바로 뜬다). 화면은 file:// 로
+    # 열려 있어 Pi 의 파일을 읽을 수 있다.
+    local = display_photo_path(url)
+    if local.exists():
+        url = local.as_uri()
     return {**best, "url": url}
 
 

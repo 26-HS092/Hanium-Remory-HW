@@ -13,7 +13,9 @@ Pi 설치: sudo apt install mpg123
 """
 from __future__ import annotations
 
+import hashlib
 import math
+import os
 import platform
 import shutil
 import queue
@@ -25,8 +27,10 @@ import time
 import requests
 from pathlib import Path
 
-# 🔊 USB 스피커 ALSA 디바이스. None 이면 system default.
-SPEAKER_ALSA_DEVICE = "plughw:CARD=UACDemoV10"
+# 🔊 스피커 ALSA 디바이스. .env 의 SPEAKER_ALSA_DEVICE 로 바꿀 수 있다.
+# ReSpeaker 3.5mm 잭으로 내보내려면 "plughw:CARD=ArrayUAC10" — 칩이 이 소리를 알고
+# 마이크에서 지운다(에코 제거). 잭 출력은 6채널 펌웨어에서만 나오고, 16kHz 로 나간다.
+SPEAKER_ALSA_DEVICE = os.getenv("SPEAKER_ALSA_DEVICE", "plughw:CARD=UACDemoV10")
 
 # 🔊 재생 볼륨(소프트웨어 증폭). 1.0=원음, 2.0=2배, 0.5=절반.
 # 하드웨어 볼륨(amixer)을 먼저 올리고도 작으면 이 값을 키우세요(너무 크면 찢어짐).
@@ -284,12 +288,14 @@ def make_chime_wav(path: str, notes, decay: float = 0.16,
 
 
 def synthesize_and_play_stream(text, url, key, sample_rate=24000, buffer_bytes=96000,
-                               on_start=None, spk_id=None, stop_event=None):
+                               on_start=None, spk_id=None, stop_event=None,
+                               before_play=None):
     """PCM을 백그라운드 스레드로 미리 받아 쌓아두고 재생. 네트워크 흔들림을 흡수한다.
 
     spk_id: 어떤 화자(목소리)로 합성할지. None 이면 서버 기본 목소리(caregiver).
             기본 목소리로 등록한 가족 음성의 speaker_id 를 넘기면 그 목소리로 말한다.
     stop_event: 켜지면 재생을 그 자리에서 멈춘다(더 급한 알림이 끼어들 때).
+    before_play: 소리를 받기 시작한 뒤, 재생 전에 부를 함수(_stream_and_play 참고).
     """
     def open_stream():
         return requests.post(url, headers={"x-api-key": key},
@@ -297,41 +303,252 @@ def synthesize_and_play_stream(text, url, key, sample_rate=24000, buffer_bytes=9
                              stream=True, timeout=60)
 
     return _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, "TTS",
-                            stop_event)
+                            stop_event, before_play)
 
 
-def synthesize_and_play_fish(text, key, reference_id=None, model=None,
-                             sample_rate=24000, buffer_bytes=24000,
-                             latency="balanced", on_start=None, stop_event=None):
-    """Fish Audio 클라우드 TTS(https://api.fish.audio/v1/tts)로 스트리밍 재생.
+# 🗂️ 정해진 문장(인사·안전 답 등)의 Fish 합성 결과를 모아 두는 곳. 문장·목소리·모델이
+# 같으면 다시 합성하지 않고 바로 튼다. 합성은 매번 0.6~2초 걸린다.
+TTS_CACHE_DIR = Path(os.getenv("TTS_CACHE_DIR", str(Path.home() / ".cache" / "mori_tts")))
 
-    reference_id: Fish Audio 에서 고른/만든 목소리 모델 ID. None 이면 Fish 기본 목소리.
-    model       : 요청 헤더 'model'(예: "s1", "s2.1-pro"). None 이면 Fish 기본 모델.
-    latency     : "low" | "balanced" | "normal". 낮을수록 첫소리가 빠르고 품질은 조금 떨어진다.
-    stop_event  : 켜지면 재생을 그 자리에서 멈춘다(더 급한 알림이 끼어들 때).
-    PCM(16bit mono)으로 받아서 CosyVoice 와 같은 aplay 파이프로 재생한다.
-    """
+
+def _fish_cache_path(text, reference_id, model, sample_rate, latency) -> Path:
+    key = "\0".join(str(v) for v in (text, reference_id, model, sample_rate, latency))
+    return TTS_CACHE_DIR / f"{hashlib.sha1(key.encode()).hexdigest()}.pcm"
+
+
+def _fish_post(text, key, reference_id, model, sample_rate, latency, stream):
     headers = {"Authorization": f"Bearer {key}"}
     if model:
         headers["model"] = model
     body = {"text": text, "format": "pcm", "sample_rate": sample_rate, "latency": latency}
     if reference_id:
         body["reference_id"] = reference_id
+    return requests.post("https://api.fish.audio/v1/tts", headers=headers,
+                         json=body, stream=stream, timeout=60)
+
+
+class _CachedResponse:
+    """캐시한 PCM 파일을 Fish 응답처럼 읽게 한다(_stream_and_play 가 그대로 쓴다)."""
+    ok = True
+    status_code = 200
+    text = ""
+
+    def __init__(self, path: Path):
+        self._path = path
+
+    def __enter__(self):
+        self._f = open(self._path, "rb")
+        return self
+
+    def __exit__(self, *exc):
+        self._f.close()
+
+    def iter_content(self, chunk_size):
+        while chunk := self._f.read(chunk_size):
+            yield chunk
+
+
+class _CachingResponse:
+    """Fish 응답을 넘겨주면서 파일에도 쓴다. 끝까지 다 받았을 때만 캐시로 남긴다."""
+
+    def __init__(self, resp, path: Path):
+        self._r = resp
+        self._path = path
+        self.ok, self.status_code = resp.ok, resp.status_code
+
+    @property
+    def text(self):
+        return self._r.text
+
+    def __enter__(self):
+        self._r.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._r.__exit__(*exc)
+
+    def iter_content(self, chunk_size):
+        tmp = self._path.with_name(f"{self._path.stem}.{threading.get_ident()}.part")
+        done = False
+        try:
+            TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            with open(tmp, "wb") as f:
+                for chunk in self._r.iter_content(chunk_size=chunk_size):
+                    f.write(chunk)
+                    yield chunk
+            done = True
+        finally:
+            if done and tmp.stat().st_size > 0:
+                tmp.replace(self._path)
+            else:
+                tmp.unlink(missing_ok=True)
+
+
+def prewarm_fish(texts, key, reference_id=None, model=None, sample_rate=24000,
+                 latency="balanced") -> None:
+    """texts 를 미리 합성해 캐시에 넣는다. 이미 있으면 건너뛴다. 백그라운드에서 부른다."""
+    made = 0
+    for text in texts:
+        path = _fish_cache_path(text, reference_id, model, sample_rate, latency)
+        if path.exists():
+            continue
+        try:
+            r = _fish_post(text, key, reference_id, model, sample_rate, latency, stream=False)
+            if not r.ok or not r.content:
+                print(f"⚠️  TTS 미리 합성 실패(HTTP {r.status_code}): {text[:20]}")
+                continue
+            TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f"{path.stem}.{threading.get_ident()}.part")
+            tmp.write_bytes(r.content)
+            tmp.replace(path)
+            made += 1
+        except Exception as e:
+            print(f"⚠️  TTS 미리 합성 실패({e}): {text[:20]}")
+    print(f"🗂️  TTS 미리 합성: 새로 {made}개, 전체 {len(texts)}개 준비됨")
+
+
+class FishLiveConnection:
+    """Fish 실시간 TTS(WebSocket) 한 번 분량. 만들자마자 뒤에서 연결한다(0.4초쯤).
+
+    LLM 에 묻는 순간 만들어 두면, 첫 문장이 왔을 때 연결을 기다리지 않는다.
+    _stream_and_play 에는 Fish 응답처럼 읽힌다. sentences 에서 문장이 나오는 대로
+    보내고 바로 합성하게 한다(flush). 앞 문장을 이어 받아 목소리가 자연스럽게
+    이어진다. 다 보내면 stop — 남은 글을 합성하고 끝낸다. 안 쓰면 close() 한다.
+    """
+    ok = True
+    status_code = 200
+    text = ""
+    URL = "wss://api.fish.audio/v1/tts/live"
+
+    def __init__(self, key, reference_id=None, model=None, sample_rate=24000,
+                 latency="balanced"):
+        self.sample_rate = sample_rate
+        self._headers = [f"Authorization: Bearer {key}"] + ([f"model: {model}"] if model else [])
+        self._request = {"text": "", "format": "pcm", "sample_rate": sample_rate,
+                         "latency": latency, "min_chunk_length": 0}
+        if reference_id:
+            self._request["reference_id"] = reference_id
+        self._ws = None
+        self._sentences = iter(())
+        self._connected = threading.Event()
+        self.connect_error: Exception | None = None
+        self.send_error: Exception | None = None
+        threading.Thread(target=self._connect, daemon=True).start()
+
+    def _connect(self) -> None:
+        import websocket
+        try:
+            self._ws = websocket.create_connection(self.URL, header=self._headers, timeout=30)
+            self._send({"event": "start", "request": self._request})
+        except Exception as e:
+            self.connect_error = e
+        finally:
+            self._connected.set()
+
+    def _send(self, event: dict) -> None:
+        import ormsgpack
+        import websocket
+        self._ws.send(ormsgpack.packb(event), opcode=websocket.ABNF.OPCODE_BINARY)
+
+    def bind(self, sentences) -> "FishLiveConnection":
+        self._sentences = sentences
+        return self
+
+    def close(self) -> None:
+        """쓰지 않고 버린다(정해진 답으로 바뀐 턴 등)."""
+        threading.Thread(target=self.__exit__, daemon=True).start()
+
+    def __enter__(self):
+        self._connected.wait(30)
+        if self.connect_error or self._ws is None:
+            raise self.connect_error or RuntimeError("Fish 실시간 TTS 연결 시간 초과")
+        threading.Thread(target=self._feed, daemon=True).start()
+        return self
+
+    def _feed(self) -> None:
+        try:
+            for s in self._sentences:
+                self._send({"event": "text", "text": s})
+                self._send({"event": "flush"})
+        except Exception as e:
+            self.send_error = e
+        finally:
+            try:
+                self._send({"event": "stop"})
+            except Exception:
+                pass
+
+    def __exit__(self, *exc):
+        self._connected.wait(30)
+        try:
+            if self._ws is not None:
+                self._ws.close()
+        except Exception:
+            pass
+
+    def iter_content(self, chunk_size):
+        import ormsgpack
+        while True:
+            msg = ormsgpack.unpackb(self._ws.recv())
+            event = msg.get("event")
+            if event == "audio":
+                yield msg["audio"]
+            elif event == "finish":
+                if msg.get("reason") != "stop":
+                    raise RuntimeError(f"Fish 실시간 TTS 오류: {msg}")
+                if self.send_error:
+                    raise self.send_error
+                return
+
+
+def synthesize_and_play_fish_live(sentences, conn: FishLiveConnection, buffer_bytes=24000,
+                                  on_start=None, stop_event=None, before_play=None):
+    """글이 다 나오기 전에 말하기 시작한다. sentences 는 문장을 차례로 내주는 iterable.
+
+    LLM 답을 받는 대로 넘기면, 답이 다 만들어지기를 기다리지 않고 첫 문장부터 말한다.
+    conn 은 미리 열어 둔 FishLiveConnection. 나머지 인자는 synthesize_and_play_fish 와
+    같다(캐시는 없다 — LLM 답은 다시 나오지 않는다).
+    """
+    return _stream_and_play(lambda: conn.bind(sentences), conn.sample_rate, buffer_bytes,
+                            on_start, "TTS(Fish 실시간)", stop_event, before_play)
+
+
+def synthesize_and_play_fish(text, key, reference_id=None, model=None,
+                             sample_rate=24000, buffer_bytes=24000,
+                             latency="balanced", on_start=None, stop_event=None,
+                             before_play=None, cache=False):
+    """Fish Audio 클라우드 TTS(https://api.fish.audio/v1/tts)로 스트리밍 재생.
+
+    reference_id: Fish Audio 에서 고른/만든 목소리 모델 ID. None 이면 Fish 기본 목소리.
+    model       : 요청 헤더 'model'(예: "s1", "s2.1-pro"). None 이면 Fish 기본 모델.
+    latency     : "low" | "balanced" | "normal". 낮을수록 첫소리가 빠르고 품질은 조금 떨어진다.
+    stop_event  : 켜지면 재생을 그 자리에서 멈춘다(더 급한 알림이 끼어들 때).
+    before_play : 소리를 받기 시작한 뒤, 재생 전에 부를 함수(_stream_and_play 참고).
+    cache       : True 면 합성 결과를 TTS_CACHE_DIR 에 남긴다. 정해진 문장에만 쓴다 —
+                  LLM 이 만든 답은 다시 나오지 않아 쌓이기만 한다. 캐시에 있으면 늘 그걸 튼다.
+    PCM(16bit mono)으로 받아서 CosyVoice 와 같은 aplay 파이프로 재생한다.
+    """
+    path = _fish_cache_path(text, reference_id, model, sample_rate, latency)
+    if path.exists():
+        return _stream_and_play(lambda: _CachedResponse(path), sample_rate, buffer_bytes,
+                                on_start, "TTS(Fish 캐시)", stop_event, before_play)
 
     def open_stream():
-        return requests.post("https://api.fish.audio/v1/tts", headers=headers,
-                             json=body, stream=True, timeout=60)
+        r = _fish_post(text, key, reference_id, model, sample_rate, latency, stream=True)
+        return _CachingResponse(r, path) if cache else r
 
     return _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, "TTS(Fish)",
-                            stop_event)
+                            stop_event, before_play)
 
 
 def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
-                     stop_event=None):
+                     stop_event=None, before_play=None):
     """open_stream() 이 돌려준 PCM 스트리밍 응답을 백그라운드로 받으며 aplay 로 재생.
 
     stop_event 가 켜지면 aplay 를 죽여 바로 조용해지고 {"interrupted": True} 를
     돌려준다. 받던 스트림은 내버려 둔다(데몬 스레드라 혼자 끝난다).
+    before_play 는 받기를 시작한 뒤, 재생 전에 부른다(표정 음악 등). 그동안 서버가
+    합성한 소리가 쌓여 있어서, 끝나자마자 바로 말한다.
     """
     t0 = time.perf_counter()
     q = queue.Queue()
@@ -355,6 +572,9 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
             q.put(None)
 
     threading.Thread(target=downloader, daemon=True).start()
+    if before_play:
+        before_play()
+    t_ready = time.perf_counter()
 
     proc = subprocess.Popen(
         ["aplay", "-q", "-f", "S16_LE", "-r", str(sample_rate), "-c", "1",
@@ -417,23 +637,29 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
             proc.stdin.close()
         except (BrokenPipeError, OSError):
             pass
-        print(f"   ⏹  {label} 재생 중단 — 더 급한 알림이 끼어듦")
+        print(f"   ⏹  {label} 재생 중단 — 더 급한 알림이나 끼어드신 말씀")
         return {"interrupted": True}
     t_end = time.perf_counter()
 
     if box["err"]:
         raise box["err"]
 
+    if t_first is None:          # 받은 소리가 없었다(빈 답)
+        t_first = t_ready
+    if box["ttfb"] is None:
+        box["ttfb"] = box["dl_done"]
     audio_sec = box["bytes"] / (sample_rate * 2)
+    # 앞소리가 있으면 첫소리는 그게 끝난 뒤부터 잰다. 어르신이 실제로 기다리는 시간이다.
+    before = f" | 앞소리 {(t_ready - t0):.2f}s" if before_play else ""
     print(
-        f"   ⏱  {label}  서버첫청크 {(box['ttfb'] - t0):.2f}s"
-        f" | 첫소리 {(t_first - t0):.2f}s"
+        f"   ⏱  {label}  서버첫청크 {(box['ttfb'] - t0):.2f}s{before}"
+        f" | 첫소리 {(t_first - t_ready):.2f}s"
         f" | 다운로드완료 {(box['dl_done'] - t0):.2f}s"
         f" | 재생완료 {(t_end - t0):.2f}s"
         f" | 오디오길이 {audio_sec:.2f}s"
     )
     return {
-        "first_sound": t_first - t0,
+        "first_sound": t_first - t_ready,
         "download_done": box["dl_done"] - t0,
         "total": t_end - t0,
         "audio_sec": audio_sec,
