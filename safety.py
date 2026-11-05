@@ -199,6 +199,11 @@ _BUILDERS = {
 }
 
 
+def fixed_replies() -> list[str]:
+    """LLM 을 거치지 않고 바로 하는 정해진 답들. 목소리를 미리 합성해 두는 데 쓴다."""
+    return [r.reply for r in (b("") for b in _BUILDERS.values()) if r.reply]
+
+
 def from_llm(kind: Optional[str]) -> Optional[Risk]:
     """LLM 이 잡아낸 신호를 규칙이 잡은 것과 같은 모양으로 만든다.
 

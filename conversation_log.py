@@ -40,6 +40,7 @@ class ConversationLogger:
         session_id: str | None = None,
         expression: str | None = None,
         emotion: dict | None = None,
+        stt_text: str | None = None,
     ) -> dict | None:
         """대화 한 턴을 JSONL 한 줄로 저장한다. 실패해도 None을 반환하고 넘어간다."""
         now = datetime.datetime.now().astimezone()
@@ -49,7 +50,8 @@ class ConversationLogger:
             "timestamp": now.isoformat(timespec="seconds"),
             "patient_id": self.patient_id,
             "device_id": self.device_id,
-            "user_text": user_text,                 # STT로 인식된 어르신 발화
+            "user_text": user_text,                 # 어르신 발화(LLM 이 바로잡았으면 그 말)
+            "stt_text": stt_text,                   # 바로잡기 전 STT 원문(고친 게 없으면 None)
             "reply": reply,                         # 모리(LLM) 응답
             "expression": expression,               # 로봇 표정
             "emotion": emotion,                     # 감정 인식 결과(dict) 또는 None

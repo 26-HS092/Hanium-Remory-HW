@@ -30,6 +30,10 @@ MANIFEST_FILE = RAG_DIR / "rag_manifest.json"        # {chroma_id: 내용해시}
 # 주소는 만료되므로 chroma 메타데이터(글이 바뀔 때만 다시 씀)가 아니라 여기에
 # 동기화 때마다 새로 쓴다.
 PHOTO_URL_FILE = RAG_DIR / "photo_urls.json"
+# 화면에 띄울 사진. 동기화 때 받아 화면 크기로 줄여 둔다. S3 에서 원본을 그때그때
+# 받으면 한 장에 1~4초 걸려서(미국 서버, 큰 건 2~3MB), 모리가 말을 시작해도 안 뜬다.
+DISPLAY_DIR    = PHOTO_DIR / "display"
+DISPLAY_SIZE   = (800, 480)                          # 인형 화면
 # 앱에서 지울 수 없는 추억을 인형 쪽에서만 빼 둘 memoryId 목록(JSON 배열).
 # 동기화마다 다시 읽으므로 고친 뒤 재시작하지 않아도 다음 동기화부터 빠진다.
 EXCLUDE_FILE   = RAG_DIR / "excluded_memories.json"
@@ -51,6 +55,37 @@ def _save_json(path: Path, data: dict) -> None:
 
 def _hash(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+
+def display_photo_path(url: str) -> Path:
+    """사진 주소에 해당하는 화면용 파일 자리. 서명(쿼리)은 동기화마다 바뀌어서 빼고
+    경로로만 이름을 짓는다 — 가족이 사진을 바꾸면 경로가 바뀌어 새로 받는다."""
+    return DISPLAY_DIR / f"{_hash(url.split('?', 1)[0])}.jpg"
+
+
+def _prepare_display_photos(urls) -> None:
+    """화면용 사진이 없는 것만 받아 화면 크기로 줄여 둔다."""
+    from PIL import Image, ImageOps
+    made = 0
+    for url in urls:
+        dest = display_photo_path(url)
+        if dest.exists():
+            continue
+        try:
+            resp = requests.get(url, timeout=60)
+            resp.raise_for_status()
+            from io import BytesIO
+            img = ImageOps.exif_transpose(Image.open(BytesIO(resp.content)))
+            img.thumbnail(DISPLAY_SIZE)
+            DISPLAY_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_suffix(".part")
+            img.convert("RGB").save(tmp, "JPEG", quality=88)
+            tmp.replace(dest)
+            made += 1
+        except Exception as e:
+            print(f"⚠️  화면용 사진 만들기 실패: {e}")
+    if made:
+        print(f"🖼️  화면용 사진 {made}장 준비")
 
 
 def _clean_meta(meta: dict) -> dict:
@@ -90,40 +125,55 @@ def _family_docs(patient_id: str, patient_name: str, family: list, note: Optiona
     return docs
 
 
-def _photo_doc(memory: dict, patient_name: str, patient_id: str, vision_model, cache: dict):
-    """추억(사진) 1개 → (chroma_id, text, metadata). 캐시 우선."""
+def _photo_doc(memory: dict, patient_name: str, patient_id: str, vision_model, cache: dict,
+               seen: set):
+    """추억(사진) 1개 → (chroma_id, text, metadata). 캐시 우선.
+
+    앱에서 같은 추억을 여러 번 올리면 memoryId 만 다르고 제목은 똑같다. 이미 넣은
+    추억과 제목이 같으면 None 을 돌려 빼고, 사진을 받지도 분석하지도 않는다.
+    seen 에 지금까지 넣은 추억의 제목을 모은다. 제목이 없으면 빼지 않는다.
+    """
     mid = str(memory.get("memoryId"))
-    pm = cache.get(mid)
-    if pm is None:
-        image_url = memory.get("imageUrl")
-        caption = " ".join(
-            x for x in [memory.get("title"), memory.get("period"), memory.get("description")] if x
-        ).strip()
-        pm = None
-        if image_url:
+    title = " ".join((memory.get("title") or "").split())
+    if title:
+        if title in seen:
+            return None
+        seen.add(title)
+    # 가족이 적은 추억 원문. 비전분석 설명이 되고, 사진을 띄울 때 모리가 이 추억을
+    # 꺼내 "이 기억 떠오르세요?" 하고 여쭌다.
+    story = " ".join(
+        x for x in [memory.get("title"), memory.get("period"), memory.get("description")] if x
+    ).strip()
+    pm = cache.get(mid) or {}
+    dest = PHOTO_DIR / f"memory_{mid}.jpg"
+    if "content" not in pm and memory.get("imageUrl"):   # 아직 안 받은 사진
+        try:
+            PHOTO_DIR.mkdir(exist_ok=True)
+            resp = requests.get(memory["imageUrl"], timeout=60)
+            resp.raise_for_status()
+            dest.write_bytes(resp.content)
+        except Exception as e:
+            print(f"⚠️  사진 받기 실패(memory {mid}): {e}")
+
+    if "content" not in pm:
+        result = None
+        if vision_model is not None and dest.exists():
             try:
-                PHOTO_DIR.mkdir(exist_ok=True)
-                dest = PHOTO_DIR / f"memory_{mid}.jpg"
-                resp = requests.get(image_url, timeout=60)
-                resp.raise_for_status()
-                dest.write_bytes(resp.content)
-                result = None
-                if vision_model is not None:
-                    from image_processor import analyze_image
-                    result = analyze_image(vision_model, dest, patient_name, caption)
-                if result:
-                    pm = {
-                        "content": result.get("content", "") or caption,
-                        "importance": result.get("importance", "medium"),
-                        "source": dest.name,
-                        "keywords": ", ".join(result.get("keywords", [])),
-                        "trigger_phrases": ", ".join(result.get("trigger_phrases", [])),
-                    }
+                from image_processor import analyze_image
+                result = analyze_image(vision_model, dest, patient_name, story)
             except Exception as e:
                 print(f"⚠️  사진 분석 실패(memory {mid}): {e}")
-        if pm is None:   # 비전분석 없음/실패 → 보호자 설명 사용
+        if result:
             pm = {
-                "content": caption or (memory.get("title") or "가족 사진"),
+                "content": result.get("content", "") or story,
+                "importance": result.get("importance", "medium"),
+                "source": dest.name,
+                "keywords": ", ".join(result.get("keywords", [])),
+                "trigger_phrases": ", ".join(result.get("trigger_phrases", [])),
+            }
+        else:   # 비전분석 없음/실패 → 보호자 설명 사용
+            pm = {
+                "content": story or (memory.get("title") or "가족 사진"),
                 "importance": "medium", "source": "",
                 "keywords": ", ".join(x for x in [memory.get("title"), memory.get("period")] if x),
                 "trigger_phrases": "",
@@ -131,11 +181,6 @@ def _photo_doc(memory: dict, patient_name: str, patient_id: str, vision_model, c
         cache[mid] = pm
 
     text = pm["content"]
-    # 비전 모델이 다시 쓴 글(text)과 별개로, 가족이 적은 추억 원문을 남겨 둔다.
-    # 사진을 띄울 때 모리가 이 추억을 꺼내 "이 기억 떠오르세요?" 하고 여쭌다.
-    story = " ".join(
-        x for x in [memory.get("title"), memory.get("period"), memory.get("description")] if x
-    ).strip()
     meta = {
         "memory_id": f"photo_{mid}", "patient_id": patient_id, "patient_name": patient_name,
         "category": "photo", "importance": pm["importance"], "source_type": "photo",
@@ -173,6 +218,7 @@ def sync_rag(patient_id: str, api_base: str, device_id, device_token: str,
     _save_json(PHOTO_URL_FILE, {
         f"photo_{m.get('memoryId')}": m["imageUrl"] for m in memories if m.get("imageUrl")
     })
+    _prepare_display_photos(m["imageUrl"] for m in memories if m.get("imageUrl"))
 
     cache = _load_json(CACHE_FILE)
 
@@ -180,8 +226,17 @@ def sync_rag(patient_id: str, api_base: str, device_id, device_token: str,
     docs = {}
     for cid, (text, meta) in _family_docs(patient_id, patient_name, family, user.get("note")).items():
         docs[cid] = {"text": text, "metadata": _clean_meta(meta), "hash": _hash(text)}
-    for m in memories:
-        cid, text, meta = _photo_doc(m, patient_name, patient_id, vision_model, cache)
+    # 같은 추억이 여러 개면 먼저 올린 것(작은 memoryId)을 남긴다. 순서를 고정해야
+    # 동기화마다 남는 쪽이 바뀌어 다시 임베딩하는 일이 없다.
+    def _mid_order(m):
+        mid = str(m.get("memoryId"))
+        return (0, int(mid), "") if mid.isdigit() else (1, 0, mid)
+    seen = set()
+    for m in sorted(memories, key=_mid_order):
+        got = _photo_doc(m, patient_name, patient_id, vision_model, cache, seen)
+        if got is None:
+            continue   # 이미 넣은 추억과 제목이 같음 → 건너뜀
+        cid, text, meta = got
         # 추억 글만 고쳐도 다시 넣도록 해시에 함께 넣는다.
         docs[cid] = {"text": text, "metadata": _clean_meta(meta),
                      "hash": _hash(text + "\n" + meta["story"])}
@@ -195,10 +250,18 @@ def sync_rag(patient_id: str, api_base: str, device_id, device_token: str,
     manifest = _load_json(MANIFEST_FILE)
     first_build = (not manifest) or (not db_path.exists())
 
-    # 참고용 JSON 도 남겨둔다(디버깅).
+    # 참고용 JSON 도 남겨둔다(디버깅). patient_info 는 main 이 매 턴 프롬프트에 넣는
+    # 기본 정보(성함·나이·가족)다 — 검색에 맡기면 유사도가 낮아 빠질 때가 있다.
     DATA_DIR.mkdir(exist_ok=True)
     _save_json(DATA_DIR / f"patient_{patient_id}.json", {
-        "patient_info": {"id": patient_id, "name": patient_name},
+        "patient_info": {
+            "id": patient_id, "name": patient_name,
+            "birthDate": user.get("birthDate"), "gender": user.get("gender"),
+            # 가족 생년월일은 아직 서버가 안 준다. 주면 그대로 담긴다.
+            "family": [{"relation": f.get("relation"), "name": f.get("name"),
+                        "birthDate": f.get("birthDate")}
+                       for f in family if f.get("name")],
+        },
         "docs": {cid: d["text"] for cid, d in docs.items()},
     })
 

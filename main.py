@@ -34,6 +34,10 @@ import time
 from pathlib import Path
 from typing import TypedDict, Literal
 import subprocess
+import tempfile
+import wave
+
+import numpy as np
 
 load_dotenv()
 
@@ -95,8 +99,8 @@ REPLY_WAIT_SEC = 8
 # 화면에 '답장하시겠어요? 예/아니오' 를 띄우고 몇 초까지 눌러 주시길 기다릴지.
 # 안 누르시면 답장 안 하시는 걸로 보고 내린다.
 REPLY_ASK_SEC = 20
-# 대화할 때마다 LLM 에 넣는 프롬프트를 터미널에 그대로 찍을지. 끄려면 PRINT_LLM_PROMPT=0
-PRINT_LLM_PROMPT = os.getenv("PRINT_LLM_PROMPT", "1") != "0"
+# 대화할 때마다 LLM 에 넣는 프롬프트를 터미널에 그대로 찍을지. 보려면 PRINT_LLM_PROMPT=1
+PRINT_LLM_PROMPT = os.getenv("PRINT_LLM_PROMPT", "0") == "1"
 # 찍은 프롬프트를 임시로 모아 둘 파일. 켤 때마다 비우고 새로 쓴다.
 LLM_PROMPT_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "llm_prompts.log")
 # 답장 말씀을 못 받았을 때 몇 번까지 다시 여쭐지
@@ -115,7 +119,7 @@ PHOTO_REPLY_DELAY_SEC = 5
 MEMORY_PHOTO_MAX_SEC = 15
 # 추억 사진을 한 번 띄우면 그 뒤 몇 턴은 같은 사진을 다시 띄우지 않는다.
 # 다른 사진은 바로 이어 띄워도 된다.
-MEMORY_PHOTO_COOLDOWN_TURNS = 3
+MEMORY_PHOTO_COOLDOWN_TURNS = 2
 # 어르신 추억(RAG)을 백엔드에서 몇 초마다 동기화할지
 RAG_SYNC_INTERVAL_SEC = 300
 # 스피커 볼륨 조절용 ALSA 컨트롤 이름 (amixer scontrols 로 확인)
@@ -147,6 +151,11 @@ reply_wake = threading.Event()
 # 워커가 읽지 않고 두었다가, 끝난 뒤에 모아 읽고 다시 여쭌다.
 reply_pending = threading.Event()
 
+# 터미널에 END_COMMANDS 중 하나를 치면 켜진다. 메인 루프가 보고 지금 대화를
+# 끝내고 웨이크워드 대기로 돌아간다. 프로세스는 끄지 않는다.
+end_conversation = threading.Event()
+END_COMMANDS = {"s", "stop", "그만"}
+
 # 마이크 디바이스 인덱스. None이면 시스템 default 입력 사용(권장).
 MIC_DEVICE_INDEX = None
 
@@ -156,7 +165,14 @@ WAKEWORD_THRESHOLD = 0.7
 CONVERSATION_IDLE_TIMEOUT_SEC = 15
 
 # 발화 종료 판단: 말끝 뒤로 이만큼 '연속 침묵'이 이어지면 끝으로 봄(ms).
+# 1000 으로 줄였더니 "그러니까 말이야 … 어제" 처럼 쉬시는 곳에서 녹음이 끝나 뒷말이
+# 통째로 사라졌다. 1500 에서는 한 번도 안 잘렸다. 대답이 0.5초 늦어도 이게 낫다.
 MIC_SILENCE_END_MS = 1500
+
+# 모리가 말하는 중에 말씀하시면 멈추고 듣는다(MicTap 의 barge). 스피커가 ReSpeaker
+# 잭에 꽂혀 있어야 한다 — 칩이 모리 목소리를 지워야 그걸 말씀으로 잘못 듣지 않는다.
+# USB 스피커처럼 칩을 거치지 않는 스피커면 모리가 제 목소리에 멈춘다. 그땐 끈다.
+BARGE_IN = os.getenv("BARGE_IN", "0") == "1"
 
 # ⏱️ 타이밍 리포트에 표시할 단계 순서.
 TIMING_ORDER = ["녹음+VAD", "STT", "RAG", "LLM", "TTS 합성", "TTS 재생"]
@@ -186,7 +202,8 @@ if LLM_ENGINE == "claude":
     import anthropic                         # noqa: E402
 from mic_vad import LiveRecorder, MicTap, strip_echo_prefix   # noqa: E402
 from audio_out import (                                                # noqa: E402
-    play_wav, synthesize_and_play_stream, synthesize_and_play_fish,
+    play_wav, synthesize_and_play_stream, synthesize_and_play_fish, prewarm_fish,
+    synthesize_and_play_fish_live, FishLiveConnection,
     make_chime_wav, CHIMES, LoopPlayer,
 )
 from wakeword import MoriyaWakeWordDetector
@@ -382,11 +399,14 @@ def chat_with_memory(client, user_text: str, context: str,
                      emotion: dict | None = None, hint: str | None = None,
                      mark: str | None = None,
                      history: list[dict] | None = None,
-                     past: str = "") -> dict:
+                     past: str = "", stream: bool = False) -> dict:
     """RAG 컨텍스트 + (있으면) 감정 상태를 system prompt에 합쳐서 LLM(LLM_ENGINE) 호출.
 
     history 는 이번 대화의 앞선 user/assistant 메시지다. 없으면 매 턴이
     처음 만난 것처럼 끊긴다. past 는 그 전 대화들의 기록(format_past_turns)이다.
+
+    stream 이면(Claude 만) reply 앞의 칸이 오는 대로 돌아온다. 그때 "reply" 는 None 이고
+    "reply_stream"(_ReplyStream) 이 reply 를 문장 단위로 내준다.
     """
     # 매 턴 똑같은 글(규칙·위험 신호·출력 형식)을 앞에, 턴마다 바뀌는 글(기억·시각·
     # 표정)을 뒤에 둔다. Claude 는 앞부분을 캐시해 두고 다음 턴에 그만큼 빨리 읽는다.
@@ -399,13 +419,20 @@ def chat_with_memory(client, user_text: str, context: str,
         "- medical    : 약을 더/덜 먹어도 되는지, 병원에 안 가도 되는지 등의 판단 요청\n"
         "- abuse      : 누가 때리거나 밥을 안 주는 등 험한 일을 당했다는 이야기\n"
         "'힘들어 죽겠다', '맛이 죽여준다' 같은 관용적인 강조는 none 입니다.\n"
-        "\n[기억 사용] reply 에 [관련 기억] 의 내용을 실제로 꺼내 말했으면 "
+        "\n[기억 사용] reply 에 [관련 기억] 의 내용을 실제로 꺼내 말할 거면 "
         "used_memory 를 true, 아니면 false 로 하세요.\n"
-        "\n[출력 형식] 반드시 아래 JSON 형식으로만 답하세요. 다른 설명 없이 JSON만 출력합니다.\n"
-        '{"reply": "어르신께 할 말", '
-        '"expression": "기쁨|슬픔|위로|경청|놀람|평온 중 하나", '
+        "\n[음성 인식] 어르신의 말은 음성 인식으로 받아 적은 글이라 잘못 들린 말이 "
+        "섞일 수 있습니다(예: '어제' → '나 옷에', '방금' → '황금'). 앞뒤가 안 맞는 "
+        "말은 발음이 비슷하고 뜻이 통하는 말로 바로잡아 이해하고 답하세요. 그렇게 "
+        "바로잡았으면 heard 에 바로잡은 문장 전체를 쓰고, 고칠 게 없거나 확실하지 "
+        "않으면 빈 문자열로 두세요.\n"
+        "\n[출력 형식] 반드시 아래 JSON 형식으로, 이 순서대로만 답하세요. 다른 설명 없이 "
+        "JSON만 출력합니다. reply 는 반드시 맨 마지막에 쓰세요.\n"
+        '{"heard": "바로잡은 어르신 말 또는 빈 문자열", '
         '"risk": "none|self_harm|harm_others|medical|abuse", '
-        '"used_memory": true|false}'
+        '"expression": "기쁨|슬픔|위로|경청|놀람|평온 중 하나", '
+        '"used_memory": true|false, '
+        '"reply": "어르신께 할 말"}'
     )
     # [관련 기억] 은 가족이 앱에 적어 넣은 글이다. 그 안에 "너는 이제 ~해라"
     # 같은 문장이 있어도 지시로 받아들이면 안 된다. 자료와 지시의 경계를 긋는다.
@@ -420,6 +447,9 @@ def chat_with_memory(client, user_text: str, context: str,
         turn_system += datamark_instruction(mark) + "\n\n"
     turn_system += context
     turn_system += f"\n\n{format_now()}"
+    profile = _patient_profile()
+    if profile:
+        turn_system += f"\n\n{profile}"
     if past:
         turn_system += f"\n\n{past}"
     if hint:
@@ -441,7 +471,19 @@ def chat_with_memory(client, user_text: str, context: str,
     if PRINT_LLM_PROMPT:
         _print_prompt([{"role": "system", "content": f"{fixed_system}\n\n{turn_system}"},
                        *chat_msgs])
-    if LLM_ENGINE == "claude":
+    if LLM_ENGINE == "claude" and stream:
+        rs = _ReplyStream(client, fixed_system, turn_system, chat_msgs)
+        head = rs.wait_head()
+        if head is not None:
+            out = _llm_fields(head)
+            out["reply"] = None
+            out["reply_stream"] = rs
+            return out
+        # reply 까지 못 갔다(거절·오류). 다 받은 글로 아래처럼 처리한다.
+        if rs.error:
+            raise rs.error
+        raw = rs.raw_text()
+    elif LLM_ENGINE == "claude":
         raw = _ask_claude(client, fixed_system, turn_system, chat_msgs)
     else:
         raw = _ask_groq(client, f"{fixed_system}\n\n{turn_system}", chat_msgs)
@@ -452,9 +494,14 @@ def chat_with_memory(client, user_text: str, context: str,
         data = None
     if not isinstance(data, dict):
         data = {"reply": _first_sentences(raw)}
-
+    out = _llm_fields(data)
     # 기억을 인용하다 표식까지 따라 쓰면 인형이 그대로 읽으므로 지운다.
-    reply = _tidy_reply(strip_marks(data.get("reply") or ""))
+    out["reply"] = _tidy_reply(strip_marks(data.get("reply") or ""))
+    return out
+
+
+def _llm_fields(data: dict) -> dict:
+    """LLM 이 준 JSON 에서 reply 를 뺀 칸들을 아는 값으로 거른다."""
     expression = data.get("expression") or "평온"
     if expression not in ROBOT_EXPRESSIONS:
         expression = "평온"
@@ -463,8 +510,10 @@ def chat_with_memory(client, user_text: str, context: str,
     if risk not in safety.LLM_KINDS:
         risk = None
     return {
-        "reply": reply, "expression": expression, "risk": risk,
+        "expression": expression, "risk": risk,
         "used_memory": data.get("used_memory") is True,
+        # 음성 인식이 잘못 들은 말을 모델이 바로잡은 문장. 고칠 게 없으면 None.
+        "heard": _tidy_reply(data.get("heard") or "") or None,
     }
 
 
@@ -493,14 +542,16 @@ def _ask_groq(client: Groq, system: str, chat_msgs: list[dict]) -> str:
 # Claude 가 지켜야 할 답의 꼴. 서버가 이 꼴을 보장해서 JSON 이 깨질 일이 없다.
 _REPLY_SCHEMA = {
     "type": "object",
+    # 순서가 곧 출력 순서다. reply 를 맨 뒤에 둬야 받는 대로 읽기 전에 risk 를 안다.
     "properties": {
-        "reply": {"type": "string"},
-        "expression": {"type": "string", "enum": ROBOT_EXPRESSIONS},
+        "heard": {"type": "string"},
         "risk": {"type": "string",
                  "enum": ["none", "self_harm", "harm_others", "medical", "abuse"]},
+        "expression": {"type": "string", "enum": ROBOT_EXPRESSIONS},
         "used_memory": {"type": "boolean"},
+        "reply": {"type": "string"},
     },
-    "required": ["reply", "expression", "risk", "used_memory"],
+    "required": ["heard", "risk", "expression", "used_memory", "reply"],
     "additionalProperties": False,
 }
 
@@ -511,10 +562,27 @@ def _ask_claude(client, fixed_system: str, turn_system: str,
 
     매 턴 같은 fixed_system 만 캐시한다. 턴마다 바뀌는 turn_system 은 그 뒤에 둔다.
     """
+    resp = client.messages.create(**_claude_request(fixed_system, turn_system, chat_msgs))
+    _print_claude_usage(resp)
+    if resp.stop_reason == "refusal":
+        print(f"⚠️  Claude 가 답을 거절함: {resp.stop_details}")
+        return json.dumps({"reply": ASK_AGAIN, "expression": "경청"}, ensure_ascii=False)
+    # 생각 블록이 앞에 올 수 있어서 첫 블록이 아니라 text 블록을 찾는다.
+    return next((b.text for b in resp.content if b.type == "text"), "{}")
+
+
+def _print_claude_usage(resp) -> None:
+    u = resp.usage
+    print(f"🧠 Claude 토큰: 입력 {u.input_tokens} + 캐시 {u.cache_read_input_tokens or 0}"
+          f" (새로 캐시 {u.cache_creation_input_tokens or 0}), 출력 {u.output_tokens}")
+
+
+def _claude_request(fixed_system: str, turn_system: str, chat_msgs: list[dict]) -> dict:
+    """messages.create / messages.stream 에 넘길 인자."""
     # Claude 는 대화가 어르신 말로 시작해야 한다. 모리 인사가 먼저면 부르신 걸 앞에 둔다.
     if chat_msgs and chat_msgs[0]["role"] == "assistant":
         chat_msgs = [{"role": "user", "content": "모리야"}, *chat_msgs]
-    resp = client.messages.create(
+    return dict(
         model=CLAUDE_MODEL,
         max_tokens=1024,   # 생각하는 몫까지 들어간다. 답만 생각하고 줄이면 잘린다.
         system=[
@@ -523,20 +591,148 @@ def _ask_claude(client, fixed_system: str, turn_system: str,
             {"type": "text", "text": turn_system},
         ],
         messages=chat_msgs,
+        # 생각을 끈다. 켜 두면 잘못 들린 말을 바로잡을 때 오래 고민해 2~3초 늦어진다.
+        # 끄는 방법이 모델마다 다르다. Sonnet 5.5 는 between_tools, Opus 5.5 는 못 끈다.
+        **({} if CLAUDE_MODEL.startswith("claude-opus-5-5") else {"thinking": {
+            "type": ("between_tools" if CLAUDE_MODEL.startswith("claude-sonnet-5-5")
+                     else "disabled")}}),
         output_config={
             "effort": CLAUDE_EFFORT,
             "format": {"type": "json_schema", "schema": _REPLY_SCHEMA},
         },
     )
-    u = resp.usage
-    print(f"🧠 Claude 토큰: 입력 {u.input_tokens} + 캐시 {u.cache_read_input_tokens or 0}"
-          f" (새로 캐시 {u.cache_creation_input_tokens or 0}), 출력 {u.output_tokens}")
-    if resp.stop_reason == "refusal":
-        print(f"⚠️  Claude 가 답을 거절함: {resp.stop_details}")
-        return json.dumps({"reply": "음, 다시 한번 말씀해 주시겠어요?",
-                           "expression": "경청"}, ensure_ascii=False)
-    # 생각 블록이 앞에 올 수 있어서 첫 블록이 아니라 text 블록을 찾는다.
-    return next((b.text for b in resp.content if b.type == "text"), "{}")
+
+
+_REPLY_KEY = re.compile(r'"reply"\s*:\s*"')
+_SENTENCE_END = re.compile(r"[.?!…~]+\s+")
+_JSON_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
+                 "n": "\n", "r": "\r", "t": "\t"}
+
+
+class _ReplyStream:
+    """Claude 의 JSON 답을 받는 대로 읽는다.
+
+    _REPLY_SCHEMA 는 reply 를 맨 뒤에 둔다. reply 앞의 칸(heard·risk·expression·
+    used_memory)이 다 오면 wait_head() 가 그 dict 를 돌려주고, reply 글은 sentences()
+    가 문장이 끝나는 대로 하나씩 내준다. 말을 시작하기 전에 위험 신호를 알 수 있다.
+    """
+
+    def __init__(self, client, fixed_system: str, turn_system: str, chat_msgs: list[dict]):
+        self._raw = ""
+        self._head: dict | None = None
+        self._head_ready = threading.Event()
+        self._done = threading.Event()
+        self._sentences: queue.Queue = queue.Queue()
+        self._reply = ""           # 지금까지 풀어 읽은 reply
+        self.error: Exception | None = None
+        self._t0 = time.perf_counter()
+        self._t_first: float | None = None
+        threading.Thread(target=self._run, daemon=True,
+                         args=(client, _claude_request(fixed_system, turn_system, chat_msgs))
+                         ).start()
+
+    def _run(self, client, request: dict) -> None:
+        pos = None          # raw 에서 아직 안 읽은 reply 글의 시작
+        pending = ""        # 아직 문장이 안 끝난 reply 글
+        try:
+            with client.messages.stream(**request) as s:
+                for delta in s.text_stream:
+                    self._raw += delta
+                    if pos is None:
+                        m = _REPLY_KEY.search(self._raw)
+                        if not m:
+                            continue
+                        head = self._raw[:m.start()].rstrip().rstrip(",") + "}"
+                        try:
+                            self._head = json.loads(head)
+                        except ValueError:
+                            self._head = {}
+                        pos = m.end()
+                        self._head_ready.set()
+                    text, pos, closed = self._decode(pos)
+                    self._reply += text
+                    pending += text
+                    *whole, pending = self._split(pending)
+                    for sent in whole:
+                        self._emit(sent)
+                    if closed:
+                        break
+                final = s.get_final_message()
+            _print_claude_usage(final)
+            if final.stop_reason == "refusal":
+                print(f"⚠️  Claude 가 답을 거절함: {final.stop_details}")
+        except Exception as e:
+            self.error = e
+        finally:
+            if pending.strip():
+                self._emit(pending)
+            t = time.perf_counter() - self._t0
+            first = f"첫 문장 {self._t_first:.2f}s | " if self._t_first else ""
+            print(f"   ⏱  LLM 스트리밍  {first}전체 {t:.2f}s")
+            self._sentences.put(None)
+            self._done.set()
+            self._head_ready.set()
+
+    def _decode(self, pos: int) -> tuple[str, int, bool]:
+        """raw[pos:] 의 JSON 문자열 글을 풀 수 있는 데까지 푼다. (글, 다음 위치, 닫혔나)"""
+        raw, out = self._raw, []
+        while pos < len(raw):
+            c = raw[pos]
+            if c == '"':
+                return "".join(out), pos + 1, True
+            if c != "\\":
+                out.append(c)
+                pos += 1
+                continue
+            if pos + 1 >= len(raw):
+                break                       # 이스케이프가 다음 조각에서 이어진다
+            e = raw[pos + 1]
+            if e == "u":
+                if pos + 6 > len(raw):
+                    break
+                out.append(chr(int(raw[pos + 2:pos + 6], 16)))
+                pos += 6
+            else:
+                out.append(_JSON_ESCAPES.get(e, e))
+                pos += 2
+        return "".join(out), pos, False
+
+    @staticmethod
+    def _split(text: str) -> list[str]:
+        """끝난 문장들과 남은 글. 마지막 원소가 아직 안 끝난 글이다."""
+        parts, last = [], 0
+        for m in _SENTENCE_END.finditer(text):
+            parts.append(text[last:m.end()])
+            last = m.end()
+        return parts + [text[last:]]
+
+    def _emit(self, sentence: str) -> None:
+        # 기억을 인용하다 표식까지 따라 쓰면 인형이 그대로 읽으므로 지운다.
+        sentence = _tidy_reply(strip_marks(sentence))
+        if not sentence:
+            return
+        if self._t_first is None:
+            self._t_first = time.perf_counter() - self._t0
+        self._sentences.put(sentence + " ")
+
+    def wait_head(self) -> dict | None:
+        """reply 앞의 칸들. reply 까지 못 가고 끝났으면 None."""
+        self._head_ready.wait()
+        return self._head
+
+    def sentences(self):
+        """reply 를 문장 단위로 내준다. 다 받으면 끝난다."""
+        while (s := self._sentences.get()) is not None:
+            yield s
+
+    def text(self, timeout: float = 30.0) -> str:
+        """다 받은 reply. 소리로 읽은 것과 같게 다듬은 글이다."""
+        self._done.wait(timeout)
+        return _tidy_reply(strip_marks(self._reply))
+
+    def raw_text(self) -> str:
+        self._done.wait()
+        return self._raw
 
 
 _QUOTE_CHARS = "'\"‘’“”「」『』"
@@ -575,16 +771,64 @@ def speak(text: str) -> None:
     tts_play(text)
 
 
-def _patient_name() -> str:
-    """어르신 성함. rag_sync 가 동기화 때마다 남기는 JSON 에서 읽는다. 모르면 ""."""
+def _patient_info() -> dict:
+    """rag_sync 가 동기화 때마다 남기는 어르신 기본 정보. 없으면 {}."""
     try:
         with open(ROOT / "rag" / "data" / f"patient_{PATIENT_ID}.json",
                   encoding="utf-8") as f:
-            name = (json.load(f).get("patient_info") or {}).get("name") or ""
+            return json.load(f).get("patient_info") or {}
     except (OSError, ValueError):
-        return ""
+        return {}
+
+
+def _patient_name() -> str:
+    """어르신 성함. 모르면 ""."""
+    name = (_patient_info().get("name") or "").strip()
     # rag_sync 는 이름이 없을 때 "어르신" 을 넣는다. "어르신님" 이 되지 않게 뺀다.
-    return "" if name.strip() == "어르신" else name.strip()
+    return "" if name == "어르신" else name
+
+
+def _age_text(birth: str | None, today: datetime.date) -> str:
+    """'1953-01-16' → '1953년 1월 16일생, 만 73세(세는 나이 74세)'. 못 읽으면 ""."""
+    try:
+        b = datetime.date.fromisoformat((birth or "")[:10])
+    except ValueError:
+        return ""
+    age = today.year - b.year - ((today.month, today.day) < (b.month, b.day))
+    return (f"{b.year}년 {b.month}월 {b.day}일생, 만 {age}세"
+            f"(세는 나이 {today.year - b.year + 1}세)")
+
+
+def _patient_profile() -> str:
+    """매 턴 프롬프트에 넣을 어르신 기본 정보. 성함·나이·가족은 자주 여쭤보시는데,
+    RAG 검색에 맡기면 유사도가 낮아 빠질 때가 있다. 가족이 앱에 적은 값이라 한 줄로
+    줄이고 길이를 자른다(지시문을 심어 두는 것을 막는다)."""
+    info = _patient_info()
+
+    def clean(v) -> str:
+        return " ".join(str(v or "").split())[:20]
+
+    today = datetime.date.today()
+    lines = []
+    name = _patient_name()
+    if name:
+        gender = {"female": "여성", "male": "남성"}.get(info.get("gender") or "", "")
+        lines.append(f"- 성함: {clean(name)}" + (f" ({gender})" if gender else ""))
+    age = _age_text(info.get("birthDate"), today)
+    if age:
+        lines.append(f"- 생년월일·나이: {age}")
+    family = []
+    for f in info.get("family") or []:
+        who = f"{clean(f.get('relation')) or '가족'} {clean(f.get('name'))}".strip()
+        f_age = _age_text(f.get("birthDate"), today)
+        family.append(f"{who}({f_age})" if f_age else who)
+    if family:
+        lines.append(f"- 가족: {', '.join(family)}")
+    if not lines:
+        return ""
+    return ("[어르신 기본 정보] 앱에 등록된 정보입니다. 여쭤보시면 이대로 답하세요. "
+            "여기 없는 것(예: 나이가 적히지 않은 가족의 나이)은 지어내지 말고 "
+            "모른다고 하세요.\n" + "\n".join(lines))
 
 
 def wake_greeting(now: datetime.datetime | None = None) -> str:
@@ -603,10 +847,36 @@ def wake_greeting(now: datetime.datetime | None = None) -> str:
     return f"{who}, 밤이 늦었네요. 잠이 잘 안 오세요?"
 
 
-def _open_mic_tap() -> MicTap | None:
-    """인형이 말하는 동안 마이크를 미리 연다. 못 열면 None(그러면 말이 끝난 뒤에 연다)."""
+# 정해진 말. 목소리를 미리 합성해 두는 문장(_cached_phrases)이라 상수로 둔다.
+ASK_AGAIN = "음, 다시 한번 말씀해 주시겠어요?"
+ASK_AGAIN_REPLY = "제대로 듣지 못했어요. 다시 한번 말씀해 주시겠어요?"   # 가족 메시지 답장
+
+
+def _cached_phrases() -> set[str]:
+    """TTS 결과를 캐시해 두는 정해진 문장. 시간대별 인사, 안전 판별의 정해진 답,
+    다시 여쭙는 말. 부르자마자 하는 인사와 안전 답은 늦으면 안 되는 말이다."""
+    today = datetime.date.today()
+    greetings = {wake_greeting(datetime.datetime.combine(today, datetime.time(h)))
+                 for h in (6, 12, 15, 19, 23)}
+    return greetings | set(safety.fixed_replies()) | {ASK_AGAIN, ASK_AGAIN_REPLY}
+
+
+def prewarm_tts() -> None:
+    """지금 목소리로 정해진 문장을 미리 합성해 둔다. 목소리가 바뀔 때마다 부른다."""
+    if TTS_ENGINE != "fish":
+        return
+    prewarm_fish(sorted(_cached_phrases()), FISH_API_KEY,
+                 reference_id=_fish_reference_id(), model=FISH_MODEL, latency=FISH_LATENCY)
+
+
+def _open_mic_tap(barge: threading.Event | None = None) -> MicTap | None:
+    """인형이 말하는 동안 마이크를 미리 연다. 못 열면 None(그러면 말이 끝난 뒤에 연다).
+
+    barge 를 주고 BARGE_IN 이 켜져 있으면, 말씀하시며 끼어들 때 barge 를 켠다.
+    """
     try:
-        return MicTap(input_device_index=MIC_DEVICE_INDEX)
+        return MicTap(input_device_index=MIC_DEVICE_INDEX,
+                      barge=(barge if BARGE_IN else None))
     except Exception as e:
         print(f"⚠️  말끝 겹쳐 듣기 마이크 열기 실패: {e}")
         return None
@@ -634,19 +904,52 @@ def _fish_reference_id() -> str | None:
     return FISH_REFERENCE_ID
 
 
-def tts_play(text: str, on_start=None, stop_event=None) -> None:
+def tts_play(text: str, on_start=None, stop_event=None, before_play=None) -> None:
     """TTS_ENGINE 에 맞는 엔진으로 text 를 합성하며 바로 재생한다.
 
-    stop_event 가 켜지면 말하다가도 멈춘다.
+    stop_event 가 켜지면 말하다가도 멈춘다. before_play 는 합성을 맡긴 뒤
+    말하기 전에 부른다 — 표정 음악이 나오는 동안 목소리를 미리 받아 둔다.
     """
     if TTS_ENGINE == "fish":
         synthesize_and_play_fish(text, FISH_API_KEY, reference_id=_fish_reference_id(),
                                  model=FISH_MODEL, latency=FISH_LATENCY,
-                                 on_start=on_start, stop_event=stop_event)
+                                 on_start=on_start, stop_event=stop_event,
+                                 before_play=before_play,
+                                 cache=text in _cached_phrases())
     else:
         synthesize_and_play_stream(text, TTS_STREAM_API_URL, TTS_API_KEY,
                                    spk_id=device_settings.get("spk_id"),
-                                   on_start=on_start, stop_event=stop_event)
+                                   on_start=on_start, stop_event=stop_event,
+                                   before_play=before_play)
+
+
+def open_live_tts() -> FishLiveConnection | None:
+    """답을 받는 대로 말할 Fish 실시간 연결을 미리 연다. LLM 에 묻는 순간 부른다."""
+    if TTS_ENGINE != "fish" or LLM_ENGINE != "claude":
+        return None
+    return FishLiveConnection(FISH_API_KEY, reference_id=_fish_reference_id(),
+                              model=FISH_MODEL, latency=FISH_LATENCY)
+
+
+def tts_play_stream(reply_stream: "_ReplyStream", conn: FishLiveConnection,
+                    on_start=None, stop_event=None, before_play=None) -> None:
+    """LLM 답을 받는 대로 말한다(Fish 실시간, conn 은 open_live_tts). 소리가 나기 전에
+    실패하면 답을 다 받아 tts_play 로 말한다. before_play 는 이미 불렸으니 다시 안 부른다."""
+    started = threading.Event()
+
+    def _on_start():
+        started.set()
+        if on_start:
+            on_start()
+
+    try:
+        synthesize_and_play_fish_live(reply_stream.sentences(), conn, on_start=_on_start,
+                                      stop_event=stop_event, before_play=before_play)
+    except Exception as e:
+        if started.is_set():
+            raise
+        print(f"⚠️  실시간 TTS 실패({e}) — 답을 다 받아 말합니다")
+        tts_play(reply_stream.text(), on_start=on_start, stop_event=stop_event)
 
 
 @contextmanager
@@ -857,11 +1160,43 @@ _EXPRESSION_JINGLES = {
 }
 
 
+# 표정 음악은 앞부분만 낸다. 음악이 끝나야 목소리가 나가는데, TTS 첫 소리는 0.6초쯤이면
+# 준비된다 — 그보다 길게 틀면 그만큼 대답이 늦어진다(원래 길이 0.9~2.1초).
+JINGLE_SEC = 0.6
+JINGLE_FADE_SEC = 0.15
+_SHORT_JINGLE_DIR = Path(tempfile.gettempdir()) / "mori_jingles"
+
+
+def _short_jingle(path: Path) -> Path:
+    """path 의 앞 JINGLE_SEC 초를 끝을 줄여 가며 자른 wav. 실패하면 원래 파일."""
+    out = _SHORT_JINGLE_DIR / f"{path.stem}_{int(JINGLE_SEC * 1000)}ms.wav"
+    try:
+        if out.exists() and out.stat().st_mtime >= path.stat().st_mtime:
+            return out
+        with wave.open(str(path)) as w:
+            rate, ch, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
+            x = np.frombuffer(w.readframes(int(rate * JINGLE_SEC)), dtype=np.int16)
+        x = x.reshape(-1, ch).astype(np.float32)
+        fade = min(len(x), int(rate * JINGLE_FADE_SEC))
+        x[-fade:] *= np.linspace(1.0, 0.0, fade)[:, None]
+        _SHORT_JINGLE_DIR.mkdir(exist_ok=True)
+        with wave.open(str(out), "wb") as w:
+            w.setnchannels(ch)
+            w.setsampwidth(width)
+            w.setframerate(rate)
+            w.writeframes(x.astype(np.int16).tobytes())
+        return out
+    except Exception as e:
+        print(f"⚠️  {path.name} 줄이기 실패: {e} — 원래 길이로 튼다")
+        return path
+
+
 def _play_expression_jingle(expression: str) -> None:
     """답을 말하기 전에 그 표정의 음악을 낸다. 스피커 잠금은 부르는 쪽이 쥔다."""
     path = _EXPRESSION_JINGLES.get(expression)
     if not path:
         return
+    path = _short_jingle(path)
     try:
         play_wav(str(path))
     except Exception as e:
@@ -1321,7 +1656,7 @@ def listen_for_reply(req: dict, stt, mic_wav: str, face=None) -> None:
             return
         ask_id = face.ask_show("제대로 듣지 못했어요", "다시 말씀해 주시겠어요?")
         with speaker_lock:
-            speak("제대로 듣지 못했어요. 다시 한번 말씀해 주시겠어요?")
+            speak(ASK_AGAIN_REPLY)
         answer = face.ask_wait(ask_id, timeout=REPLY_RETRY_ASK_SEC)
         print(f"💌 다시 말씀하실지: {answer or '응답 없음'}")
         if answer != "yes":
@@ -1519,6 +1854,7 @@ def in_dnd(dnd, now=None):
 def settings_worker():
     """서버에서 볼륨·방해금지·기본 목소리(speaker_id)를 주기적으로 읽어 반영한다."""
     headers = {"X-Device-Token": DEVICE_TOKEN}
+    prewarmed = False
     while True:
         try:
             r = requests.get(f"{REMORY_API}/devices/{DEVICE_ID}/settings", headers=headers, timeout=30)
@@ -1537,15 +1873,48 @@ def settings_worker():
                 if v.get("voiceId") == default_id:
                     spk = v.get("speakerId")
                     break
-            if spk != device_settings["spk_id"]:
-                device_settings["spk_id"] = spk
-                print(f"🎙️  기본 목소리 speaker_id = {spk}")
+            if spk != device_settings["spk_id"] or not prewarmed:
+                if spk != device_settings["spk_id"]:
+                    device_settings["spk_id"] = spk
+                    print(f"🎙️  기본 목소리 speaker_id = {spk}")
+                # 정해진 말을 이 목소리로 미리 합성한다. 처음 한 번, 그리고 목소리가 바뀔 때.
+                threading.Thread(target=prewarm_tts, daemon=True).start()
+                prewarmed = True
 
             r = requests.get(f"{REMORY_API}/devices/{DEVICE_ID}/dnd", headers=headers, timeout=30)
             device_settings["dnd"] = r.json().get("data")
         except Exception as e:
             print(f"⚠️  설정 동기화 오류: {e}")
         time.sleep(SETTINGS_SYNC_INTERVAL_SEC)
+
+
+class _AnyEvent:
+    """여러 Event 중 하나라도 켜지면 켜진 것으로 보는 Event. tts_play 의 stop_event 용."""
+
+    def __init__(self, *events):
+        self.events = events
+
+    def is_set(self) -> bool:
+        return any(e.is_set() for e in self.events)
+
+    def wait(self, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.is_set():
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+        return True
+
+
+def stdin_worker() -> None:
+    """터미널에서 END_COMMANDS 를 받으면 대화를 끝내라고 메인 루프에 알린다."""
+    while True:
+        line = sys.stdin.readline()
+        if not line:        # stdin 이 없다(systemd 로 켰을 때 등)
+            return
+        if line.strip().lower() in END_COMMANDS:
+            print("⌨️  대화 끝내기 명령")
+            end_conversation.set()
 
 
 @contextmanager
@@ -1713,6 +2082,10 @@ def main() -> None:
     threading.Thread(target=rag_sync_worker, args=(vision_model,), daemon=True).start()
     print("🧠 RAG 동기화 워커 시작")
 
+    # ⌨️ 터미널 명령 워커(대화 끝내기)
+    threading.Thread(target=stdin_worker, daemon=True).start()
+    print(f"⌨️  대화를 끝내려면 터미널에 {' / '.join(sorted(END_COMMANDS))} 입력")
+
     # 준비가 다 끝났으니 화면의 로딩을 걷고 얼굴을 보인다.
     if face:
         face.set_ready()
@@ -1726,6 +2099,10 @@ def main() -> None:
     last_reply = ""
     # 이번 대화(웨이크워드~종료)에서 몇 번 주고받았는지. 끝날 때 일과로 남긴다.
     turns_this_session = 0
+    # 말씀이 없으면 대화를 끝낼 시각(time.monotonic). 모리가 말을 마친 뒤 처음 듣기
+    # 시작할 때 정하고, 대답을 들어야 지운다. 소음에 녹음이 켜졌다가 빈 글로 끝나도
+    # 그대로 두어야 한다 — 매번 새로 세면 소음이 이어지는 동안 대화가 안 끝난다.
+    idle_deadline: float | None = None
     # 이번 대화에서 주고받은 말(LLM messages 형식). 웨이크워드마다 새로 시작한다.
     history: list[dict] = []
     # 바로 앞 턴에 보여 드린 추억 사진. 다음 턴에 그 추억을 이어 말한다.
@@ -1737,8 +2114,35 @@ def main() -> None:
     # 그 전 대화들의 기록. 웨이크워드마다 대화 로그에서 다시 읽는다.
     past_block = ""
 
+    # 말하다가도 터미널 명령이 오면 멈춘다.
+    tts_stop = _AnyEvent(tts_interrupt, end_conversation)
+
+    def end_session() -> None:
+        """대화를 끝내고 웨이크워드 대기로 돌아갈 준비를 한다."""
+        nonlocal conversation_active, conv_session_id, turns_this_session
+        # 이제 안 듣는다는 걸 알린다. 모르시고 계속 말을 거시지 않게.
+        _play_cue_if_free("bye")
+        conversation_active = False
+        conv_session_id = None       # 세션 종료
+        report_conversation(False)   # 대화중 종료
+        # 한 마디도 못 나눈 헛걸음은 일과에 남기지 않는다.
+        if turns_this_session:
+            report_activity(
+                "DAILY_CONVERSATION", f"{turns_this_session}번 주고받았어요"
+            )
+            turns_this_session = 0
+
     while True:
         try:
+            # 터미널에서 대화를 끝내라고 했으면 끝낸다. 대화 중이 아니면 할 게 없다.
+            if end_conversation.is_set():
+                end_conversation.clear()
+                if conversation_active:
+                    print("💤 대화를 종료하고 웨이크워드 대기로 돌아갑니다.")
+                    _think_stop(face)
+                    end_session()
+                    continue
+
             # 가족 메시지를 읽어드린 뒤라면 답장부터 여쭙는다.
             reply_req = _take_reply_request()
             if reply_req:
@@ -1761,6 +2165,8 @@ def main() -> None:
                 # 답장 요청이 오면 웨이크워드 대기를 끊고 위로 돌아간다.
                 if not wakeword_detector.wait_for_wakeword(stop_event=reply_wake):
                     continue
+                # 기다리는 동안 친 끝내기 명령이 새 대화를 바로 끊지 않게 버린다.
+                end_conversation.clear()
 
                 # 카메라에 잡힌 사람이 없어도 대화는 시작한다. 대신 바로 빠르게 찾는다.
                 if hasattr(tracker, "has_target") and not tracker.has_target(
@@ -1786,6 +2192,7 @@ def main() -> None:
                     _play_cue("wake")
                 conversation_active = True
                 turns_this_session = 0
+                idle_deadline = None
                 history = []
                 photo_followup = None
                 photo_cooldown_id, photo_cooldown = None, 0
@@ -1803,12 +2210,13 @@ def main() -> None:
                 history.append({"role": "assistant", "content": greeting})
                 try:
                     with speaker_lock:
-                        # 인사 끝에 바로 대답하셔도 듣는다.
-                        mic_tap = _open_mic_tap()
+                        # 인사 끝에 바로 대답하셔도 듣고, 인사 중에 말씀하시면 멈추고 듣는다.
+                        barge = threading.Event()
+                        mic_tap = _open_mic_tap(barge)
                         tts_play(
                             greeting,
                             on_start=(face.start_speaking if face else None),
-                            stop_event=tts_interrupt,
+                            stop_event=_AnyEvent(tts_stop, barge),
                         )
                         if mic_tap:
                             mic_tap.end()
@@ -1849,17 +2257,21 @@ def main() -> None:
             if face:
                 face.listen_start()
             tap, mic_tap = mic_tap, None    # 녹음기가 이어 쓰고 닫는다
+            if idle_deadline is None:
+                idle_deadline = time.monotonic() + CONVERSATION_IDLE_TIMEOUT_SEC
             try:
                 with timed("녹음+VAD", timings):
                     wav_path = recorder.record_until_silence(
                         mic_wav,
                         on_speech_start=(on_start if emotion_svc else None),
                         on_speech_end=(on_end if emotion_svc else None),
-                        max_wait_seconds=CONVERSATION_IDLE_TIMEOUT_SEC,
+                        # 남은 시간만 기다린다(소음 때문에 빈 글로 끝난 녹음이 있었으면 줄어 있다).
+                        max_wait_seconds=max(0.5, idle_deadline - time.monotonic()),
                         # 듣는 동안 목소리에 맞춰 전구가 밝아지고, 쉬실 때 끄덕인다.
                         on_level=(face.listen_level if face else None),
                         on_pause=(face.nod if face else None),
                         tap=tap,
+                        stop_event=end_conversation,
                     )
             finally:
                 recording.clear()
@@ -1873,19 +2285,11 @@ def main() -> None:
                 print("🔇 녹음에 알림 소리가 섞임 — 버리고 다시 듣습니다")
                 continue
 
+            if end_conversation.is_set():
+                continue                    # 위에서 끝낸다
             if wav_path is None:
                 print("💤 대화를 종료하고 웨이크워드 대기로 돌아갑니다.")
-                # 이제 안 듣는다는 걸 알린다. 모르시고 계속 말을 거시지 않게.
-                _play_cue_if_free("bye")
-                conversation_active = False
-                conv_session_id = None       # 세션 종료
-                report_conversation(False)   # 대화중 종료
-                # 한 마디도 못 나눈 헛걸음은 일과에 남기지 않는다.
-                if turns_this_session:
-                    report_activity(
-                        "DAILY_CONVERSATION", f"{turns_this_session}번 주고받았어요"
-                    )
-                    turns_this_session = 0
+                end_session()
                 continue
 
             # 다 들었다는 표시. 답이 나오기까지(STT~LLM~TTS 첫소리) 몇 초 비는
@@ -1896,14 +2300,20 @@ def main() -> None:
             with timed("STT", timings):
                 user_text, stt_elapsed = stt.transcribe(wav_path)
             if recorder.used_overlap and last_reply:
-                cleaned = strip_echo_prefix(user_text, last_reply)
+                # 끼어드셨으면 모리가 말하던 중간이 섞인다 — 답 어디와 겹쳐도 지운다.
+                cleaned = strip_echo_prefix(user_text, last_reply,
+                                            anywhere=bool(tap and tap.barged))
                 if cleaned != user_text:
                     print(f"↩️  섞여 들어간 모리 말 지움: {user_text!r} → {cleaned!r}")
                     user_text = cleaned
             print(f"🗣️  이용자: {user_text}   ({stt_elapsed:.2f}s)")
+            if end_conversation.is_set():
+                continue                    # 위에서 끝낸다
             if not user_text:
+                # 소음이었다. 기다릴 시각(idle_deadline)은 그대로 두고 남은 시간만 더 듣는다.
                 _think_stop(face)
                 continue
+            idle_deadline = None     # 말씀을 들었다. 모리가 답한 뒤 다시 센다.
 
             # ②-1 안전 판별. LLM 을 부르기 전에 한 번 거른다.
             risk = safety.classify(user_text)
@@ -1959,10 +2369,18 @@ def main() -> None:
             #    나머지는 규칙이 잡았더라도 LLM 을 불러 더 급한 신호가 있는지 본다
             #    ("씨발 그냥 자다가 안 깨어났으면" 은 규칙상 거친 말일 뿐이다).
             used_memory = False
+            heard_text = user_text   # 기억에 남길 어르신 말. LLM 이 바로잡으면 그 말.
+            # 답을 받는 대로 말할 때(Claude + Fish)는 reply 가 말한 뒤에야 다 찬다.
+            # 그동안 reply 는 None 이고 reply_stream 이 문장을 내준다.
+            reply_stream = None
+            live_tts = None
             if risk and risk.kind == safety.SELF_HARM:
                 reply, robot_expr = risk.reply, risk.expression
                 timings["LLM"] = 0.0
             else:
+                # 말할 연결을 LLM 에 묻는 동안 미리 연다(0.4초쯤 걸린다).
+                live_tts = open_live_tts()
+                # 받는 대로 말하면 이 시간은 reply 앞의 칸(위험 신호·표정)이 올 때까지다.
                 with timed("LLM", timings):
                     llm_out = chat_with_memory(
                         llm_client, user_text, context, emotion,
@@ -1970,12 +2388,26 @@ def main() -> None:
                         mark=mark,
                         history=history[-HISTORY_TURNS * 2:],
                         past=past_block,
+                        stream=live_tts is not None,
                     )
                 reply, robot_expr = llm_out["reply"], llm_out["expression"]
+                reply_stream = llm_out.get("reply_stream")
                 used_memory = llm_out["used_memory"]
+                if llm_out["heard"] and llm_out["heard"] != user_text:
+                    heard_text = llm_out["heard"]
+                    print(f"👂 바로잡아 들음: {user_text!r} → {heard_text!r}")
+                    # 잘못 들린 탓에 규칙이 놓친 위험 신호가 있을 수 있다.
+                    if not risk:
+                        risk = safety.classify(heard_text)
+                        if risk:
+                            print(f"🛡️  안전 신호(바로잡은 말): {risk.kind} ({risk.matched!r})")
+                            threading.Thread(
+                                target=report_safety, args=(risk.kind, heard_text),
+                                daemon=True,
+                            ).start()
 
                 # 규칙이 놓쳤거나 약하게 본 것을 LLM 이 더 급하게 봤으면 올린다.
-                upgraded = safety.escalate(risk, llm_out.get("risk"), user_text)
+                upgraded = safety.escalate(risk, llm_out.get("risk"), heard_text)
                 if upgraded:
                     print(f"🛡️  안전 신호(LLM): {upgraded.kind}"
                           + (f" ← {risk.kind}" if risk else ""))
@@ -1987,9 +2419,21 @@ def main() -> None:
                     risk = upgraded
 
                 # 정해진 말이 있는 종류(자해·타해·의료)는 모델이 쓴 답 대신 그걸 쓴다.
+                # 받는 대로 말하던 답은 버린다 — 아직 한 마디도 말하지 않았다.
                 if risk and risk.reply:
                     reply, robot_expr = risk.reply, risk.expression
-            print(f"🐻 모리: {reply}    [표정: {robot_expr}]")
+                    reply_stream = None
+            if reply_stream is None and live_tts is not None:
+                live_tts.close()     # 정해진 답·거절 — 미리 연 연결은 쓰지 않는다
+            if reply_stream is None:
+                print(f"🐻 모리: {reply}    [표정: {robot_expr}]")
+            else:
+                print(f"🐻 모리: (받는 대로 말함)    [표정: {robot_expr}]")
+            # 생각하는 사이에 끝내라고 했으면 말하지 않고 끝낸다.
+            if end_conversation.is_set():
+                if reply_stream is not None:
+                    live_tts.close()
+                continue
 
             # 고른 추억 사진은 답하는 동안 보여 드린다. LLM 이 위험 신호를 더 급하게
             # 봤거나 그 추억을 꺼내지 않았으면 띄우지 않는다.
@@ -2000,17 +2444,6 @@ def main() -> None:
                 photo_followup = memory_photo.photo
                 photo_cooldown_id = memory_photo.photo["memory_id"]
                 photo_cooldown = MEMORY_PHOTO_COOLDOWN_TURNS
-
-            # 말이 나가는 걸 늦추지 않도록 따로 보낸다.
-            turns_this_session += 1
-            history += [{"role": "user", "content": user_text},
-                        {"role": "assistant", "content": reply}]
-            # 다음 대화에서 기억하도록 로컬 로그에 남긴다(recent_turns 가 읽는다).
-            conv_logger.log_turn(user_text, reply, session_id=conv_session_id,
-                                 expression=robot_expr, emotion=emotion)
-            threading.Thread(
-                target=report_utterances, args=(user_text, reply), daemon=True
-            ).start()
 
             if face:
                 face.set_expression(robot_expr)
@@ -2024,26 +2457,57 @@ def main() -> None:
                 with speaker_lock:
                     # 안전 신호가 걸린 턴엔 음악을 깔지 않는다 — 답이 늦어지면 안 된다.
                     # 약 알림이 기다리고 있어도 깔지 않는다 — 곧 끊긴다.
-                    if not risk and not tts_interrupt.is_set():
-                        _play_expression_jingle(robot_expr)
-                    # 말하는 동안 마이크를 미리 열어 둔다. 말끝과 겹쳐 대답하셔도 듣는다.
-                    mic_tap = _open_mic_tap()
+                    play_jingle = not risk and not tts_interrupt.is_set()
+                    # 말씀하시며 끼어드시면 켜진다(MicTap). 안전 신호에 대한 답은
+                    # 끝까지 한다 — 그보다 급한 말은 없다.
+                    barge = None if risk else threading.Event()
+
+                    # 목소리 합성을 먼저 맡기고, 음악은 그동안 낸다.
+                    def before_speaking():
+                        nonlocal mic_tap
+                        if play_jingle:
+                            _play_expression_jingle(robot_expr)
+                        # 말하는 동안 마이크를 미리 열어 둔다. 말끝과 겹쳐 대답하셔도
+                        # 듣는다. 음악이 담기지 않게 음악이 끝난 뒤에 연다.
+                        mic_tap = _open_mic_tap(barge)
+
                     with timed("TTS 스트리밍", timings):
-                        tts_play(
-                            reply,
+                        speak_args = dict(
                             on_start=(face.start_speaking if face else None),
-                            # 약 알림이 오면 대답을 끊고 알림부터 한다. 안전 신호에
+                            # 약 알림이 오거나 끼어드시면 대답을 끊는다. 안전 신호에
                             # 대한 답은 끝까지 한다 — 그보다 급한 말은 없다.
-                            stop_event=(None if risk else tts_interrupt),
+                            stop_event=(None if risk else _AnyEvent(tts_stop, barge)),
+                            before_play=before_speaking,
                         )
+                        if reply_stream is not None:
+                            tts_play_stream(reply_stream, live_tts, **speak_args)
+                        else:
+                            tts_play(reply, **speak_args)
                     if mic_tap:
                         mic_tap.end()
-                    last_reply = reply
             finally:
                 if face:
                     face.stop_speaking()
                 if memory_photo:
                     memory_photo.finish()
+                if reply_stream is not None:
+                    reply = reply_stream.text()
+                    print(f"🐻 모리: {reply}")
+                last_reply = reply
+
+                # 받는 대로 말하면 답이 말한 뒤에야 다 차서, 기록은 말한 뒤에 남긴다.
+                turns_this_session += 1
+                # 대화 기억에는 바로잡은 말을 남긴다. 다음에 "어제 뭐 먹었지?" 에 답하려면
+                # "나 옷에 된장찌개" 가 아니라 "어제 된장찌개" 로 남아 있어야 한다.
+                history += [{"role": "user", "content": heard_text},
+                            {"role": "assistant", "content": reply}]
+                # 다음 대화에서 기억하도록 로컬 로그에 남긴다(recent_turns 가 읽는다).
+                conv_logger.log_turn(heard_text, reply, session_id=conv_session_id,
+                                     stt_text=(user_text if heard_text != user_text else None),
+                                     expression=robot_expr, emotion=emotion)
+                threading.Thread(
+                    target=report_utterances, args=(user_text, reply), daemon=True
+                ).start()
 
             if face:
                 face.set_expression("평온")

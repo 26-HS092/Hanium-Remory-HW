@@ -242,9 +242,13 @@ class MoriyaWakeWordDetector:
 
         print("\n👂 웨이크워드 대기 중... ('모리야'라고 말하세요)")
 
+        # ReSpeaker 6채널 펌웨어는 6으로 열어야 한다. 0번(칩이 처리한 소리)만 쓴다(audio_callback).
+        dev = sd.query_devices(self.input_device_index, "input")
+        channels = 6 if "ReSpeaker" in dev["name"] and dev["max_input_channels"] >= 6 else 1
+
         with sd.InputStream(
             samplerate=SAMPLE_RATE,
-            channels=1,
+            channels=channels,
             dtype="int16",
             blocksize=1280,
             callback=audio_callback,
