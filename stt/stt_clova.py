@@ -2,7 +2,8 @@ import os
 import time
 
 import requests
-import soundfile as sf
+
+from audio_prep import prepared_wav_bytes
 
 # NAVER Cloud Platform — CLOVA Speech Recognition(CSR, 짧은 문장 인식).
 # 녹음된 WAV 바이트를 그대로 보내면 {"text": "..."} 로 돌려준다. (최대 60초)
@@ -17,7 +18,11 @@ MAX_AUDIO_SEC = 60.0
 class ClovaSTTHandler:
     """stt4vad_hat.STTHandler 와 같은 인터페이스: transcribe(path) -> (text, elapsed)."""
 
-    def __init__(self, lang="Kor", timeout=10.0):
+    def __init__(self, lang="Kor", timeout=10.0, normalize=None):
+        # 보내기 전에 말소리 크기를 맞출지(audio_prep). STT_NORMALIZE=0 이면 끈다.
+        if normalize is None:
+            normalize = os.getenv("STT_NORMALIZE", "1") != "0"
+        self.normalize = normalize
         self.client_id = os.environ["CLOVA_CLIENT_ID"]
         self.client_secret = os.environ["CLOVA_CLIENT_SECRET"]
         self.lang = lang
@@ -28,15 +33,14 @@ class ClovaSTTHandler:
     def transcribe(self, audio_path):
         start_time = time.time()
 
-        info = sf.info(audio_path)
-        if info.duration < MIN_AUDIO_SEC:
-            print(f"⚠️  STT: 너무 짧은 발화({info.duration:.2f}s) — 건너뜀")
+        data, duration, gain_db = prepared_wav_bytes(audio_path, self.normalize)
+        if duration < MIN_AUDIO_SEC:
+            print(f"⚠️  STT: 너무 짧은 발화({duration:.2f}s) — 건너뜀")
             return "", time.time() - start_time
-        if info.duration > MAX_AUDIO_SEC:
-            print(f"⚠️  STT: 60초 초과({info.duration:.1f}s) — CSR 한도라 잘릴 수 있음")
-
-        with open(audio_path, "rb") as f:
-            data = f.read()
+        if duration > MAX_AUDIO_SEC:
+            print(f"⚠️  STT: 60초 초과({duration:.1f}s) — CSR 한도라 잘릴 수 있음")
+        if gain_db >= 3:
+            print(f"🔊 STT: 작은 목소리 → {gain_db:.0f}dB 키워 보냄")
 
         try:
             res = self.session.post(
