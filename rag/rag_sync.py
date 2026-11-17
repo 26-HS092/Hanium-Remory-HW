@@ -160,7 +160,8 @@ def _photo_doc(memory: dict, patient_name: str, patient_id: str, vision_model, c
     if "content" not in pm and memory.get("imageUrl"):   # 아직 안 받은 사진
         try:
             PHOTO_DIR.mkdir(exist_ok=True)
-            resp = requests.get(memory["imageUrl"], timeout=60)
+            # 화면용(imageUrl)은 5:3 으로 잘려 있다. 잘린 부분까지 읽게 자르기 전 사진을 쓴다.
+            resp = requests.get(memory.get("originalImageUrl") or memory["imageUrl"], timeout=60)
             resp.raise_for_status()
             dest.write_bytes(resp.content)
         except Exception as e:
