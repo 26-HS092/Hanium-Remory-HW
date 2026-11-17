@@ -188,14 +188,23 @@ sys.path.insert(0, str(ROOT / "emotion"))
 sys.path.insert(0, str(ROOT / "face"))
 
 # STT 엔진 선택: hailo(온디바이스 whisper) | clova(NAVER CLOVA CSR)
+#              | clova_speech(CLOVA Speech + 이름 부스팅) | groq(Whisper large-v3)
 STT_ENGINE = os.getenv("STT_ENGINE", "hailo").lower()
 if STT_ENGINE == "clova":
     from stt_clova import ClovaSTTHandler as STTHandler   # noqa: E402
+elif STT_ENGINE == "clova_speech":
+    from stt_clova_speech import ClovaSpeechSTTHandler as STTHandler  # noqa: E402
+elif STT_ENGINE == "groq":
+    from stt_groq import GroqSTTHandler as STTHandler      # noqa: E402
 else:
     from stt4vad_hat import STTHandler              # noqa: E402
 from retriever import build_context_prompt, find_related_photo  # noqa: E402
 from datamark import new_mark, strip_marks, instruction as datamark_instruction  # noqa: E402
 from conversation_log import ConversationLogger  # noqa: E402
+from stt_keywords import boost_words              # noqa: E402
+from stt_samples import SampleSaver               # noqa: E402
+# SAVE_STT_WAV=1 이면 매 턴 녹음을 stt_samples/ 에 남긴다(stt_compare.py 로 엔진 비교).
+STT_SAMPLES = SampleSaver.from_env()
 
 from groq import Groq, BadRequestError       # noqa: E402
 if LLM_ENGINE == "claude":
@@ -423,9 +432,12 @@ def chat_with_memory(client, user_text: str, context: str,
         "used_memory 를 true, 아니면 false 로 하세요.\n"
         "\n[음성 인식] 어르신의 말은 음성 인식으로 받아 적은 글이라 잘못 들린 말이 "
         "섞일 수 있습니다(예: '어제' → '나 옷에', '방금' → '황금'). 앞뒤가 안 맞는 "
-        "말은 발음이 비슷하고 뜻이 통하는 말로 바로잡아 이해하고 답하세요. 그렇게 "
-        "바로잡았으면 heard 에 바로잡은 문장 전체를 쓰고, 고칠 게 없거나 확실하지 "
-        "않으면 빈 문자열로 두세요.\n"
+        "말은 발음이 비슷하고 뜻이 통하는 말로 바로잡아 이해하고 답하세요. 바로잡을 "
+        "때는 바로 앞에 모리가 한 말(어르신은 대개 그 물음에 답하십니다)과 "
+        "[어르신 기본 정보] 의 성함·가족 이름을 근거로 삼으세요. 예: 모리가 손주 "
+        "이름을 여쭸는데 '지운이'로 들렸고 가족에 '지훈'이 있으면 '지훈이'입니다. "
+        "그렇게 바로잡았으면 heard 에 바로잡은 문장 전체를 쓰세요. 앞뒤가 맞는 말은 "
+        "고치지 말고, 고칠 게 없거나 근거가 없어 확실하지 않으면 빈 문자열로 두세요.\n"
         "\n[출력 형식] 반드시 아래 JSON 형식으로, 이 순서대로만 답하세요. 다른 설명 없이 "
         "JSON만 출력합니다. reply 는 반드시 맨 마지막에 쓰세요.\n"
         '{"heard": "바로잡은 어르신 말 또는 빈 문자열", '
@@ -1640,6 +1652,7 @@ def listen_for_reply(req: dict, stt, mic_wav: str, face=None) -> None:
         if wav_path is not None:
             _think_start(face)   # 받아 적는 동안
             text, _ = stt.transcribe(wav_path)
+            STT_SAMPLES.save(wav_path, text, prev=prompt, where="family_reply")
             text = (text or "").strip()
             _think_stop(face)
         print(f"💌 어르신 답장: {text or '못 받음'}")
@@ -1983,6 +1996,10 @@ def main() -> None:
             print(f"⚠️  표정 디스플레이 비활성화: {e}")
 
     stt           = STTHandler()
+    # 이름 부스팅을 받는 엔진(clova_speech·groq)에 어르신·가족 이름을 알려 준다.
+    # 동기화로 가족 정보가 바뀌어도 반영되게 매번 새로 읽는다.
+    if hasattr(stt, "set_keywords"):
+        stt.set_keywords(lambda: boost_words(PATIENT_ID))
 
     # 대화 내용 저장기(백엔드가 나중에 파일에서 가져감)
     conv_logger   = ConversationLogger(
@@ -2299,6 +2316,7 @@ def main() -> None:
             # ② STT
             with timed("STT", timings):
                 user_text, stt_elapsed = stt.transcribe(wav_path)
+            stt_sample = STT_SAMPLES.save(wav_path, user_text, prev=last_reply)
             if recorder.used_overlap and last_reply:
                 # 끼어드셨으면 모리가 말하던 중간이 섞인다 — 답 어디와 겹쳐도 지운다.
                 cleaned = strip_echo_prefix(user_text, last_reply,
@@ -2502,6 +2520,7 @@ def main() -> None:
                 history += [{"role": "user", "content": heard_text},
                             {"role": "assistant", "content": reply}]
                 # 다음 대화에서 기억하도록 로컬 로그에 남긴다(recent_turns 가 읽는다).
+                STT_SAMPLES.note_heard(stt_sample, heard_text)
                 conv_logger.log_turn(heard_text, reply, session_id=conv_session_id,
                                      stt_text=(user_text if heard_text != user_text else None),
                                      expression=robot_expr, emotion=emotion)

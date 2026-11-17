@@ -153,7 +153,7 @@ Flutter 앱으로 어르신 상태를 보고,
 | **근접 감지** | mmWave 레이더 (Seeed MR24HPC1 계열, UART) | 2초마다 사람 유무 확인 · 없으면 웨이크워드·트래킹 쉼 |
 | **웨이크워드** | openWakeWord + 자체 학습 `moriya_v1.onnx` | CPU 추론, 0.25초 간격 · threshold 0.9 |
 | **녹음/VAD** | PyAudio + `webrtcvad` (aggressiveness 2) | RMS 에너지 게이트 병행, 말끝 침묵 2초로 종료 |
-| **STT** | Whisper-base `.hef` @ Hailo GenAI | `small.hef` 은 언어 파라미터 무시 버그가 있어 base 사용 · `STT_ENGINE=clova` 면 NAVER CLOVA |
+| **STT** | Whisper-base `.hef` @ Hailo GenAI | `small.hef` 은 언어 파라미터 무시 버그가 있어 base 사용 · `STT_ENGINE=clova` 면 NAVER CLOVA CSR, `clova_speech` 면 CLOVA Speech(이름 부스팅), `groq` 면 Whisper large-v3 · CLOVA·Groq 는 보내기 전에 작은 목소리를 키움 |
 | **감정 인식** | YuNet(얼굴 검출) + 직접 학습 5감정(`emotion_ko5.onnx`) | 모델이 없으면 HSEmotion(AffectNet 8감정) · 0.7초 간격 샘플 → 신뢰도 가중 다수결 |
 | **얼굴 트래킹** | Pi 카메라 + YOLOv8 포즈 `.hef` + 아두이노 팬틸트 | Hailo 에서 사람·관절을 찾아 머리 쪽으로 돌림 · 못 열면 Pixy2 팬틸트 + YuNet |
 | **RAG** | Chroma + `jhgan/ko-sroberta-multitask` | 안정 ID 기반 증분 동기화 (사진 수백 장도 빠름) |
@@ -188,7 +188,13 @@ yolo26_tracker/
 
 stt/
 ├── stt4vad_hat.py   Hailo Whisper STT + 환청 필터
-└── stt_clova.py     NAVER CLOVA STT (STT_ENGINE=clova)
+├── stt_clova.py     NAVER CLOVA CSR (STT_ENGINE=clova)
+├── stt_clova_speech.py  CLOVA Speech + 이름 부스팅 (STT_ENGINE=clova_speech)
+├── stt_groq.py      Groq Whisper large-v3 (STT_ENGINE=groq)
+├── audio_prep.py    보내기 전 소리 크기 맞추기 (STT_NORMALIZE=0 이면 끔)
+├── stt_keywords.py  부스팅할 어르신·가족 이름 모으기
+└── stt_samples.py   STT 비교용 녹음 저장 (SAVE_STT_WAV=1)
+stt_compare.py       같은 녹음으로 STT 엔진 비교 (label → run)
 
 emotion/
 ├── config.py        모델 경로 · 카메라 · 감정 라벨(한글 매핑)
@@ -280,6 +286,11 @@ FISH_MODEL=s2.1-pro-free          # 안 정하면 유료 모델로 가서 크레
 # TTS_API_KEY=...
 
 STT_ENGINE=hailo                  # clova 면 CLOVA_CLIENT_ID · CLOVA_CLIENT_SECRET 필요
+# CLOVA_SPEECH_INVOKE_URL=...     # STT_ENGINE=clova_speech 일 때 (콘솔 > CLOVA Speech > 빌더)
+# CLOVA_SPEECH_SECRET=...
+# STT_BOOST_WORDS=혈압약,수원     # (선택) 부스팅에 더할 말. 어르신·가족 이름은 자동
+# STT_NORMALIZE=0                 # 작은 목소리 키우기 끄기(기본 켬)
+# SAVE_STT_WAV=1                  # 매 턴 녹음을 stt_samples/ 에 남김 → python stt_compare.py
 TRACK_BACKEND=hailo               # pixy 면 Pixy2 팬틸트
 MMWAVE_PORT=/dev/ttyAMA0          # MMWAVE_ENABLED=false 로 끌 수 있음
 
