@@ -223,6 +223,11 @@ def main():
         "위험 발화 재현율(종류 일치)": lambda r: r["label"] != "none",
         "관용구 오탐율": lambda r: r["type"] == "idiom",
         "일상 발화 오탐율": lambda r: r["type"] == "normal",
+        # build_risk_eval.py 로 만든 평가셋에만 있는 칸. 위험한 낱말이 있지만 남 이야기·
+        # 지난 일·부정·가정이라 대응할 필요가 없는 말을 위험으로 잡은 비율.
+        "맥락(남·과거·부정·가정) 오탐율": lambda r: r["label"] == "none"
+            and r.get("frame") in ("other", "past", "negated", "hypothetical")
+            and int(r.get("level") or 0) == 0,
     }
 
     table = {}
