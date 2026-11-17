@@ -151,6 +151,19 @@ reply_wake = threading.Event()
 # 워커가 읽지 않고 두었다가, 끝난 뒤에 모아 읽고 다시 여쭌다.
 reply_pending = threading.Event()
 
+# 사람이 없다가 들어오시면 켜진다. 웨이크워드 대기를 끊고 모리가 먼저 말을 건다.
+proactive_wake = threading.Event()
+# 이만큼 넘게 안 계셨다가 오셔야 말을 건다. 레이더가 잠깐 놓쳤다 다시 잡은 걸
+# '들어오셨다'로 보지 않게 하려는 것이다.
+PROACTIVE_MIN_AWAY_SEC = float(os.getenv("PROACTIVE_MIN_AWAY_SEC", "60"))
+# 먼저 말을 건 뒤 이만큼은 다시 들어오셔도 말을 걸지 않는다. 방을 들락날락하실
+# 때마다 말을 걸면 귀찮으시다.
+PROACTIVE_COOLDOWN_SEC = float(os.getenv("PROACTIVE_COOLDOWN_SEC", str(30 * 60)))
+# 들어오신 지 이만큼 지난 신호는 버린다(그 사이 다른 일을 하고 있었으면 늦은 인사다).
+PROACTIVE_STALE_SEC = 20.0
+# 레이더 스레드가 쓰고 메인 루프가 읽는다.
+_presence = {"away_since": None, "came_at": 0.0, "last_proactive": None}
+
 # 터미널에 END_COMMANDS 중 하나를 치면 켜진다. 메인 루프가 보고 지금 대화를
 # 끝내고 웨이크워드 대기로 돌아간다. 프로세스는 끄지 않는다.
 end_conversation = threading.Event()
@@ -864,6 +877,10 @@ _SHORT_GREETINGS = ["네, {who}! 부르셨어요?",
                     "네, 모리 여기 있어요. 무슨 이야기 할까요?",
                     "네, 말씀하세요, {who}.",
                     "네, {who}. 듣고 있어요."]
+# 방에 들어오셨을 때 모리가 먼저 건네는 말. 그 시간대에 처음이면 시간대 안부를 쓴다.
+_COMEBACK_GREETINGS = ["{who}, 오셨어요? 어디 다녀오셨어요?",
+                       "{who}, 다녀오셨어요? 모리가 기다리고 있었어요.",
+                       "어, {who} 오셨네요! 잘 다녀오셨어요?"]
 # 안부를 여쭌 시간대(날짜, 시간대)와 마지막으로 한 인사. 메인 루프에서만 바꾼다.
 _greeted: dict = {"slot": None, "last": None}
 
@@ -901,10 +918,60 @@ def wake_greeting(now: datetime.datetime | None = None) -> str:
     return greeting
 
 
+def comeback_greeting(now: datetime.datetime | None = None) -> str:
+    """방에 들어오셨을 때 먼저 건네는 말. 그 시간대에 처음 뵈면 시간대 안부를,
+    이미 안부를 여쭸으면 '오셨어요?' 하고 반긴다."""
+    now = now or datetime.datetime.now()
+    slot = (now.date(), _greeting_slot(now.hour))
+    if _greeted["slot"] != slot:
+        return wake_greeting(now)
+    who = _patient_who()
+    choices = [g.format(who=who) for g in _COMEBACK_GREETINGS]
+    if _greeted["last"] in choices:
+        choices.remove(_greeted["last"])
+    greeting = random.choice(choices)
+    _greeted.update(last=greeting)
+    return greeting
+
+
+def _on_presence(here: bool) -> None:
+    """레이더가 사람 있음/없음이 바뀌었다고 알려 올 때(레이더 스레드)."""
+    now = time.monotonic()
+    if not here:
+        _presence["away_since"] = now
+        proactive_wake.clear()
+        return
+    away_since, _presence["away_since"] = _presence["away_since"], None
+    if away_since is None or now - away_since < PROACTIVE_MIN_AWAY_SEC:
+        return
+    last = _presence["last_proactive"]
+    if last is not None and now - last < PROACTIVE_COOLDOWN_SEC:
+        print(f"📡 들어오셨지만 {int((now - last) / 60)}분 전에 말을 걸어서 쉰다")
+        return
+    _presence["came_at"] = now
+    proactive_wake.set()
+
+
+def _take_proactive() -> bool:
+    """들어오셔서 먼저 말을 걸 차례인지. 신호는 꺼낸다."""
+    if not proactive_wake.is_set():
+        return False
+    proactive_wake.clear()
+    if time.monotonic() - _presence["came_at"] > PROACTIVE_STALE_SEC:
+        return False
+    if in_dnd(device_settings["dnd"]):
+        print("🔕 들어오셨지만 방해 금지 시간 — 말 걸지 않음")
+        return False
+    if alert_speaking.is_set() or reply_pending.is_set():
+        return False    # 알림이나 답장이 먼저다
+    _presence["last_proactive"] = time.monotonic()
+    return True
+
+
 def _all_greetings() -> set[str]:
     """나올 수 있는 인사 전부(목소리를 미리 합성해 둔다)."""
     who = _patient_who()
-    pools = [*_SLOT_GREETINGS.values(), _SHORT_GREETINGS]
+    pools = [*_SLOT_GREETINGS.values(), _SHORT_GREETINGS, _COMEBACK_GREETINGS]
     return {g.format(who=who) for pool in pools for g in pool}
 
 
@@ -2090,6 +2157,8 @@ def main() -> None:
 
     # 📡 mmWave 레이더: 사람이 없으면 팬틸트를 쉰다(웨이크워드는 늘 듣는다).
     presence = create_presence() if create_presence is not None else None
+    if presence:
+        presence.on_change(_on_presence)
 
     # 🎯 얼굴 트래킹 ①: Hailo 트래커(아두이노 팬틸트)는 Pi 카메라를 직접 열고,
     #    감정 인식이 그 화면과 '따라가는 사람' 얼굴 위치를 같이 쓴다.
@@ -2254,8 +2323,16 @@ def main() -> None:
                 # 레이더·카메라가 사람을 놓쳐도 웨이크워드는 늘 듣는다. 옆에 계신데
                 # 못 잡는 때가 있어, 부르셨는데 대답을 안 하면 안 된다.
                 # 답장 요청이 오면 웨이크워드 대기를 끊고 위로 돌아간다.
-                if not wakeword_detector.wait_for_wakeword(stop_event=reply_wake):
-                    continue
+                # 방에 들어오시면(proactive_wake) 부르시기 전에 모리가 먼저 말을 건다.
+                proactive = False
+                if not wakeword_detector.wait_for_wakeword(
+                    stop_event=_AnyEvent(reply_wake, proactive_wake)
+                ):
+                    if not _take_proactive():
+                        continue
+                    proactive = True
+                    print("📡 들어오셨다 — 모리가 먼저 말을 건다")
+                proactive_wake.clear()
                 # 기다리는 동안 친 끝내기 명령이 새 대화를 바로 끊지 않게 버린다.
                 end_conversation.clear()
 
@@ -2267,10 +2344,11 @@ def main() -> None:
                     if hasattr(tracker, "seek"):
                         tracker.seek()
                 dnd = device_settings["dnd"]
-                if in_dnd(dnd) and not (dnd or {}).get("allowWakeWord", True):
+                if not proactive and in_dnd(dnd) and not (dnd or {}).get("allowWakeWord", True):
                     print("🔕 방해 금지 시간 — 조용히 대기")
                     continue
-                print("🎤 말씀하세요.")
+                if not proactive:
+                    print("🎤 말씀하세요.")
                 if face:
                     # 사진을 보고 계셨더라도 말을 거시면 대화가 먼저다.
                     _hide_photo_now(face)
@@ -2279,8 +2357,10 @@ def main() -> None:
                     face.set_expression("경청")
                 # 알아들었다는 '띵'. 녹음보다 먼저 끝까지 낸다 — 녹음 중에 울리면
                 # 마이크가 이 소리를 말씀으로 알아듣는다.
-                with speaker_lock:
-                    _play_cue("wake")
+                # 먼저 말을 걸 때는 부르신 게 아니라 '띵' 없이 바로 인사한다.
+                if not proactive:
+                    with speaker_lock:
+                        _play_cue("wake")
                 conversation_active = True
                 turns_this_session = 0
                 idle_deadline = None
@@ -2296,8 +2376,8 @@ def main() -> None:
 
                 # 불러 주셨으니 먼저 인사를 건넨다. 대화 기록에도 넣어 다음 답이
                 # 이 안부("점심은 드셨어요?")에 이어지게 한다.
-                greeting = wake_greeting()
-                print(f"🐻 모리(인사): {greeting}")
+                greeting = comeback_greeting() if proactive else wake_greeting()
+                print(f"🐻 모리({'먼저 말 걸기' if proactive else '인사'}): {greeting}")
                 history.append({"role": "assistant", "content": greeting})
                 try:
                     with speaker_lock:
