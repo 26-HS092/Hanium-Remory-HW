@@ -75,6 +75,8 @@ _KEEP_NAMES = {
 _KEEP_FUNCS = {
     "chat_with_memory", "_ask_groq", "_ask_claude", "_failed_generation",
     "_tidy_reply", "_first_sentences", "format_now", "_korean_time",
+    "_claude_request", "_print_claude_usage", "_print_prompt", "_llm_fields",
+    "_ReplyStream",
 }
 
 
@@ -93,13 +95,15 @@ def load_chat():
             isinstance(t, ast.Name) and t.id in _KEEP_NAMES for t in n.targets
         ):
             nodes.append(n)
-        elif isinstance(n, ast.FunctionDef) and n.name in _KEEP_FUNCS:
+        elif isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in _KEEP_FUNCS:
             nodes.append(n)
     ns = {
         "os": os, "re": re, "json": json, "datetime": datetime, "safety": safety,
         "Groq": Groq, "BadRequestError": BadRequestError,
         "strip_marks": strip_marks, "datamark_instruction": datamark_instruction,
         "PRINT_LLM_PROMPT": False,
+        # 앱에 등록된 어르신 정보. 평가는 문장만 보고 판단하는지 재므로 비운다.
+        "_patient_profile": lambda: "",
     }
     exec(compile(ast.Module(nodes, []), "main.py", "exec"), ns)
     engine = ns["LLM_ENGINE"]
