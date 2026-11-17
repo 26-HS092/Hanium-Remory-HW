@@ -1163,12 +1163,17 @@ def report_safety(kind: str, excerpt: str) -> None:
     이어간다 — 인형이 어르신 곁에서 할 말은 이미 했다.
     """
     try:
-        requests.post(
+        r = requests.post(
             f"{REMORY_API}/devices/{DEVICE_ID}/safety-events",
             json={"kind": kind, "excerpt": excerpt[:500]},
             headers={"X-Device-Token": DEVICE_TOKEN},
             timeout=30,
         )
+        # 서버가 거절해도 예외가 안 나서, 가족에게 갔는지 로그로는 알 수 없었다.
+        if r.ok:
+            print(f"🛡️  안전 신호 보냄: {kind} {excerpt[:40]!r}")
+        else:
+            print(f"⚠️  안전 신호 기록 거절({r.status_code}): {r.text[:200]}")
     except Exception as e:
         print(f"⚠️  안전 신호 기록 실패: {e}")
 
