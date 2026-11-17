@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import queue
+import random
 import re
 import requests
 import threading
@@ -842,20 +843,68 @@ def _patient_profile() -> str:
             "모른다고 하세요.\n" + "\n".join(lines))
 
 
-def wake_greeting(now: datetime.datetime | None = None) -> str:
-    """불러 주셨을 때 먼저 건네는 인사. 시간대에 맞춰 안부를 여쭌다."""
-    hour = (now or datetime.datetime.now()).hour
-    name = _patient_name()
-    who = f"{name}님" if name else "어르신"
+# 시간대별 안부. 그 시간대에 처음 불러 주셨을 때 하나를 골라 여쭌다.
+_SLOT_GREETINGS = {
+    "아침": ["좋은 아침이에요, {who}! 밤새 잘 주무셨어요?",
+            "{who}, 좋은 아침이에요! 아침은 드셨어요?",
+            "안녕히 주무셨어요, {who}? 오늘 기분은 어떠세요?"],
+    "점심": ["좋은 오후예요, {who}! 점심은 맛있게 드셨어요?",
+            "{who}, 점심 진지는 드셨어요?"],
+    "오후": ["좋은 오후예요, {who}! 오늘 하루는 어떻게 보내고 계세요?",
+            "{who}, 오후 잘 보내고 계세요?"],
+    "저녁": ["좋은 저녁이에요, {who}! 저녁 진지는 드셨어요?",
+            "{who}, 벌써 저녁이네요. 오늘 하루 어떠셨어요?"],
+    "밤": ["{who}, 밤이 늦었네요. 잠이 잘 안 오세요?",
+          "{who}, 아직 안 주무셨네요. 무슨 생각 하고 계셨어요?"],
+}
+# 같은 시간대에 또 불러 주시면 안부를 되풀이하지 않고 짧게 대답한다. 저녁에 다섯 번
+# 부르시면 다섯 번 다 "저녁 진지는 드셨어요?" 하고 여쭙는 게 어색했다.
+_SHORT_GREETINGS = ["네, {who}! 부르셨어요?",
+                    "네, 모리 여기 있어요. 무슨 이야기 할까요?",
+                    "네, 말씀하세요, {who}.",
+                    "네, {who}. 듣고 있어요."]
+# 안부를 여쭌 시간대(날짜, 시간대)와 마지막으로 한 인사. 메인 루프에서만 바꾼다.
+_greeted: dict = {"slot": None, "last": None}
+
+
+def _greeting_slot(hour: int) -> str:
     if 5 <= hour < 11:
-        return f"좋은 아침이에요, {who}! 밤새 잘 주무셨어요?"
+        return "아침"
     if 11 <= hour < 14:
-        return f"좋은 오후예요, {who}! 점심은 맛있게 드셨어요?"
+        return "점심"
     if 14 <= hour < 18:
-        return f"좋은 오후예요, {who}! 오늘 하루는 어떻게 보내고 계세요?"
+        return "오후"
     if 18 <= hour < 22:
-        return f"좋은 저녁이에요, {who}! 저녁 진지는 드셨어요?"
-    return f"{who}, 밤이 늦었네요. 잠이 잘 안 오세요?"
+        return "저녁"
+    return "밤"
+
+
+def _patient_who() -> str:
+    name = _patient_name()
+    return f"{name}님" if name else "어르신"
+
+
+def wake_greeting(now: datetime.datetime | None = None) -> str:
+    """불러 주셨을 때 먼저 건네는 인사. 그 시간대에 처음이면 안부를 여쭙고, 이미
+    여쭸으면 짧게 대답한다. 바로 전에 한 인사와 같은 말은 피한다."""
+    now = now or datetime.datetime.now()
+    slot = (now.date(), _greeting_slot(now.hour))
+    first = _greeted["slot"] != slot
+    pool = _SLOT_GREETINGS[slot[1]] if first else _SHORT_GREETINGS
+    who = _patient_who()
+    choices = [g.format(who=who) for g in pool]
+    if len(choices) > 1 and _greeted["last"] in choices:
+        choices.remove(_greeted["last"])
+    greeting = random.choice(choices)
+    _greeted.update(slot=slot, last=greeting)
+    return greeting
+
+
+def _all_greetings() -> set[str]:
+    """나올 수 있는 인사 전부(목소리를 미리 합성해 둔다)."""
+    who = _patient_who()
+    pools = [*_SLOT_GREETINGS.values(), _SHORT_GREETINGS]
+    return {g.format(who=who) for pool in pools for g in pool}
 
 
 # 정해진 말. 목소리를 미리 합성해 두는 문장(_cached_phrases)이라 상수로 둔다.
@@ -866,10 +915,7 @@ ASK_AGAIN_REPLY = "제대로 듣지 못했어요. 다시 한번 말씀해 주시
 def _cached_phrases() -> set[str]:
     """TTS 결과를 캐시해 두는 정해진 문장. 시간대별 인사, 안전 판별의 정해진 답,
     다시 여쭙는 말. 부르자마자 하는 인사와 안전 답은 늦으면 안 되는 말이다."""
-    today = datetime.date.today()
-    greetings = {wake_greeting(datetime.datetime.combine(today, datetime.time(h)))
-                 for h in (6, 12, 15, 19, 23)}
-    return greetings | set(safety.fixed_replies()) | {ASK_AGAIN, ASK_AGAIN_REPLY}
+    return _all_greetings() | set(safety.fixed_replies()) | {ASK_AGAIN, ASK_AGAIN_REPLY}
 
 
 def prewarm_tts() -> None:
