@@ -157,6 +157,15 @@ def _photo_doc(memory: dict, patient_name: str, patient_id: str, vision_model, c
     ).strip()
     pm = cache.get(mid) or {}
     dest = PHOTO_DIR / f"memory_{mid}.jpg"
+    # 앱에서 글이나 사진을 고치면 memoryId 는 그대로라 캐시를 그냥 쓰게 된다.
+    # 고친 내용(글 + 사진 경로)이 캐시 때와 다르면 사진을 다시 받고 다시 읽는다.
+    # 서명(쿼리)은 동기화마다 바뀌므로 경로만 본다.
+    photo = (memory.get("originalImageUrl") or memory.get("imageUrl") or "").split("?", 1)[0]
+    sig = _hash(f"{story}|{photo}")
+    if "content" in pm and pm.get("sig") not in (None, sig):
+        print(f"✏️  고친 추억 다시 읽기(memory {mid})")
+        pm = {}
+        dest.unlink(missing_ok=True)
     if "content" not in pm and memory.get("imageUrl"):   # 아직 안 받은 사진
         try:
             PHOTO_DIR.mkdir(exist_ok=True)
@@ -190,7 +199,12 @@ def _photo_doc(memory: dict, patient_name: str, patient_id: str, vision_model, c
                 "keywords": ", ".join(x for x in [memory.get("title"), memory.get("period")] if x),
                 "trigger_phrases": "",
             }
+        pm["sig"] = sig
         cache[mid] = pm
+    elif "sig" not in pm:
+        # 이 기능 전에 만든 캐시. 그때 내용 그대로라고 보고 지금 서명을 붙인다
+        # (전부 다시 분석하면 첫 동기화가 오래 걸리고 비전 호출이 몰린다).
+        pm["sig"] = sig
 
     text = pm["content"]
     meta = {
