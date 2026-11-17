@@ -2585,7 +2585,8 @@ def main() -> None:
                           + (f" ← {risk.kind}" if risk else ""))
                     threading.Thread(
                         target=report_safety,
-                        args=(upgraded.kind, user_text),
+                        # 가족 앱에 뜨는 문장이다. 잘못 들린 그대로가 아니라 바로잡은 말을 보낸다.
+                        args=(upgraded.kind, heard_text),
                         daemon=True,
                     ).start()
                     risk = upgraded
