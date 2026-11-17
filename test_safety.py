@@ -192,6 +192,7 @@ expect("서로에게 무슨 일이 닥쳐도 같이 힘이 되어 줄 거야", N
 expect("의사가 급하게 수술을 해야 된다고 했어", None, "걱정이지 판단 요청이 아니다")
 expect("친구가 자살했다는 게 믿기지 않아", None, "남 이야기 — LLM 몫")
 expect("나는 죽고 싶지 않아서 안절부절못해", None, "부정")
+expect("나는 아직 죽고 싶지는 않은데 말이야", None, "부정(-지는)")
 print("\n[말뭉치 오탐] 고치면서 놓치면 안 되는 것")
 expect("이 씹새끼야", safety.PROFANITY)
 expect("닥쳐!", safety.PROFANITY)
