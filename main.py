@@ -34,7 +34,6 @@ import time
 from pathlib import Path
 from typing import TypedDict, Literal
 import subprocess
-import tempfile
 import wave
 
 import numpy as np
@@ -881,14 +880,17 @@ def prewarm_tts() -> None:
                  reference_id=_fish_reference_id(), model=FISH_MODEL, latency=FISH_LATENCY)
 
 
-def _open_mic_tap(barge: threading.Event | None = None) -> MicTap | None:
+def _open_mic_tap(barge: threading.Event | None = None,
+                  extra_grace_ms: int = 0) -> MicTap | None:
     """인형이 말하는 동안 마이크를 미리 연다. 못 열면 None(그러면 말이 끝난 뒤에 연다).
 
     barge 를 주고 BARGE_IN 이 켜져 있으면, 말씀하시며 끼어들 때 barge 를 켠다.
+    extra_grace_ms: 목소리 앞에 음악이 먼저 나가면 그 길이. 끼어들기를 그만큼 늦게 본다.
     """
     try:
         return MicTap(input_device_index=MIC_DEVICE_INDEX,
-                      barge=(barge if BARGE_IN else None))
+                      barge=(barge if BARGE_IN else None),
+                      grace_ms=MicTap.BARGE_IN_GRACE_MS + extra_grace_ms)
     except Exception as e:
         print(f"⚠️  말끝 겹쳐 듣기 마이크 열기 실패: {e}")
         return None
@@ -916,23 +918,25 @@ def _fish_reference_id() -> str | None:
     return FISH_REFERENCE_ID
 
 
-def tts_play(text: str, on_start=None, stop_event=None, before_play=None) -> None:
+def tts_play(text: str, on_start=None, stop_event=None, before_play=None,
+             lead_pcm: bytes | None = None) -> None:
     """TTS_ENGINE 에 맞는 엔진으로 text 를 합성하며 바로 재생한다.
 
     stop_event 가 켜지면 말하다가도 멈춘다. before_play 는 합성을 맡긴 뒤
-    말하기 전에 부른다 — 표정 음악이 나오는 동안 목소리를 미리 받아 둔다.
+    말하기 전에 부른다. lead_pcm(표정 음악)은 목소리 앞에 같은 재생으로 이어 낸다 —
+    음악이 나오는 동안 목소리를 미리 받아 둔다.
     """
     if TTS_ENGINE == "fish":
         synthesize_and_play_fish(text, FISH_API_KEY, reference_id=_fish_reference_id(),
                                  model=FISH_MODEL, latency=FISH_LATENCY,
                                  on_start=on_start, stop_event=stop_event,
                                  before_play=before_play,
-                                 cache=text in _cached_phrases())
+                                 cache=text in _cached_phrases(), lead_pcm=lead_pcm)
     else:
         synthesize_and_play_stream(text, TTS_STREAM_API_URL, TTS_API_KEY,
                                    spk_id=device_settings.get("spk_id"),
                                    on_start=on_start, stop_event=stop_event,
-                                   before_play=before_play)
+                                   before_play=before_play, lead_pcm=lead_pcm)
 
 
 def open_live_tts() -> FishLiveConnection | None:
@@ -944,9 +948,11 @@ def open_live_tts() -> FishLiveConnection | None:
 
 
 def tts_play_stream(reply_stream: "_ReplyStream", conn: FishLiveConnection,
-                    on_start=None, stop_event=None, before_play=None) -> None:
+                    on_start=None, stop_event=None, before_play=None,
+                    lead_pcm: bytes | None = None) -> None:
     """LLM 답을 받는 대로 말한다(Fish 실시간, conn 은 open_live_tts). 소리가 나기 전에
-    실패하면 답을 다 받아 tts_play 로 말한다. before_play 는 이미 불렸으니 다시 안 부른다."""
+    실패하면 답을 다 받아 tts_play 로 말한다. before_play 와 표정 음악(lead_pcm)은
+    이미 냈으니 다시 안 낸다."""
     started = threading.Event()
 
     def _on_start():
@@ -956,7 +962,8 @@ def tts_play_stream(reply_stream: "_ReplyStream", conn: FishLiveConnection,
 
     try:
         synthesize_and_play_fish_live(reply_stream.sentences(), conn, on_start=_on_start,
-                                      stop_event=stop_event, before_play=before_play)
+                                      stop_event=stop_event, before_play=before_play,
+                                      lead_pcm=lead_pcm)
     except Exception as e:
         if started.is_set():
             raise
@@ -1176,43 +1183,36 @@ _EXPRESSION_JINGLES = {
 # 준비된다 — 그보다 길게 틀면 그만큼 대답이 늦어진다(원래 길이 0.9~2.1초).
 JINGLE_SEC = 0.6
 JINGLE_FADE_SEC = 0.15
-_SHORT_JINGLE_DIR = Path(tempfile.gettempdir()) / "mori_jingles"
+TTS_SAMPLE_RATE = 24000          # Fish·CosyVoice 모두 이 빠르기의 PCM 으로 받는다
+_jingle_cache: dict[str, bytes] = {}
 
 
-def _short_jingle(path: Path) -> Path:
-    """path 의 앞 JINGLE_SEC 초를 끝을 줄여 가며 자른 wav. 실패하면 원래 파일."""
-    out = _SHORT_JINGLE_DIR / f"{path.stem}_{int(JINGLE_SEC * 1000)}ms.wav"
-    try:
-        if out.exists() and out.stat().st_mtime >= path.stat().st_mtime:
-            return out
-        with wave.open(str(path)) as w:
-            rate, ch, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
-            x = np.frombuffer(w.readframes(int(rate * JINGLE_SEC)), dtype=np.int16)
-        x = x.reshape(-1, ch).astype(np.float32)
-        fade = min(len(x), int(rate * JINGLE_FADE_SEC))
-        x[-fade:] *= np.linspace(1.0, 0.0, fade)[:, None]
-        _SHORT_JINGLE_DIR.mkdir(exist_ok=True)
-        with wave.open(str(out), "wb") as w:
-            w.setnchannels(ch)
-            w.setsampwidth(width)
-            w.setframerate(rate)
-            w.writeframes(x.astype(np.int16).tobytes())
-        return out
-    except Exception as e:
-        print(f"⚠️  {path.name} 줄이기 실패: {e} — 원래 길이로 튼다")
-        return path
+def _jingle_pcm(expression: str, rate: int = TTS_SAMPLE_RATE) -> bytes | None:
+    """그 표정의 음악 앞 JINGLE_SEC 초를 끝을 줄여 가며, rate·16bit 모노 PCM 으로.
 
-
-def _play_expression_jingle(expression: str) -> None:
-    """답을 말하기 전에 그 표정의 음악을 낸다. 스피커 잠금은 부르는 쪽이 쥔다."""
+    목소리와 같은 aplay 로 이어 낸다(lead_pcm). 따로 aplay 를 열면 0.6초 음악에
+    0.8~0.9초가 걸렸다 — 장치를 열고 비우는 시간이 붙는다. 없거나 못 읽으면 None.
+    """
     path = _EXPRESSION_JINGLES.get(expression)
     if not path:
-        return
-    path = _short_jingle(path)
+        return None
+    if expression in _jingle_cache:
+        return _jingle_cache[expression]
     try:
-        play_wav(str(path))
+        with wave.open(str(path)) as w:
+            src, ch = w.getframerate(), w.getnchannels()
+            x = np.frombuffer(w.readframes(int(src * JINGLE_SEC)), dtype=np.int16)
+        x = x.reshape(-1, ch).mean(axis=1)
+        t = np.arange(int(len(x) * rate / src)) * src / rate
+        y = np.interp(t, np.arange(len(x)), x)
+        fade = min(len(y), int(rate * JINGLE_FADE_SEC))
+        y[-fade:] *= np.linspace(1.0, 0.0, fade)
+        pcm = y.astype(np.int16).tobytes()
     except Exception as e:
-        print(f"⚠️  {expression} 음악 재생 실패: {e}")
+        print(f"⚠️  {expression} 음악 읽기 실패: {e}")
+        return None
+    _jingle_cache[expression] = pcm
+    return pcm
 
 
 def _think_start(face=None) -> None:
@@ -2479,15 +2479,17 @@ def main() -> None:
                     # 말씀하시며 끼어드시면 켜진다(MicTap). 안전 신호에 대한 답은
                     # 끝까지 한다 — 그보다 급한 말은 없다.
                     barge = None if risk else threading.Event()
+                    # 표정 음악은 목소리와 같은 재생으로 앞에 붙여 낸다(lead_pcm).
+                    jingle = _jingle_pcm(robot_expr) if play_jingle else None
+                    jingle_ms = (len(jingle) * 1000 // (TTS_SAMPLE_RATE * 2)) if jingle else 0
 
-                    # 목소리 합성을 먼저 맡기고, 음악은 그동안 낸다.
+                    # 음악이 나오는 동안 목소리를 받고 마이크를 연다.
                     def before_speaking():
                         nonlocal mic_tap
-                        if play_jingle:
-                            _play_expression_jingle(robot_expr)
                         # 말하는 동안 마이크를 미리 열어 둔다. 말끝과 겹쳐 대답하셔도
-                        # 듣는다. 음악이 담기지 않게 음악이 끝난 뒤에 연다.
-                        mic_tap = _open_mic_tap(barge)
+                        # 듣는다. 음악과 함께 열리니, 끼어들기를 안 보는 시간에 음악
+                        # 길이를 더한다(모리 목소리가 시작된 뒤 BARGE_IN_GRACE_MS 동안).
+                        mic_tap = _open_mic_tap(barge, extra_grace_ms=jingle_ms)
 
                     with timed("TTS 스트리밍", timings):
                         speak_args = dict(
@@ -2496,6 +2498,7 @@ def main() -> None:
                             # 대한 답은 끝까지 한다 — 그보다 급한 말은 없다.
                             stop_event=(None if risk else _AnyEvent(tts_stop, barge)),
                             before_play=before_speaking,
+                            lead_pcm=jingle,
                         )
                         if reply_stream is not None:
                             tts_play_stream(reply_stream, live_tts, **speak_args)

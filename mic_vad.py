@@ -155,7 +155,7 @@ class MicTap:
 
     def __init__(self, rate: int = 16000, chunk_duration_ms: int = 30,
                  tail_ms: int = 1000, input_device_index: int | None = None,
-                 barge: threading.Event | None = None):
+                 barge: threading.Event | None = None, grace_ms: int | None = None):
         self.rate = rate
         self.chunk_size = int(rate * chunk_duration_ms / 1000)
         self.tail: list[bytes] = []
@@ -167,7 +167,8 @@ class MicTap:
         self._barge = barge
         self._chip = None
         self._window: deque = deque(maxlen=max(1, self.BARGE_IN_MS // chunk_duration_ms))
-        self._grace_frames = self.BARGE_IN_GRACE_MS // chunk_duration_ms
+        self._grace_frames = (self.BARGE_IN_GRACE_MS if grace_ms is None
+                              else grace_ms) // chunk_duration_ms
         self._after_barge = 0        # 끼어드신 걸 알아챈 뒤 지난 프레임 수
         self._preroll = 200 // chunk_duration_ms
         if barge is not None:
