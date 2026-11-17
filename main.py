@@ -199,6 +199,7 @@ elif STT_ENGINE == "groq":
 else:
     from stt4vad_hat import STTHandler              # noqa: E402
 from retriever import build_context_prompt, find_related_photo  # noqa: E402
+from rag_sync import prepare_display_photo  # noqa: E402
 from datamark import new_mark, strip_marks, instruction as datamark_instruction  # noqa: E402
 from conversation_log import ConversationLogger  # noqa: E402
 from stt_keywords import boost_words              # noqa: E402
@@ -1531,11 +1532,35 @@ def _sender_label(m: dict) -> str:
     return "가족"
 
 
-def _deliver_chat(m: dict, face=None, intro: str = "", cue: bool = True) -> None:
+class _PhotoPrefetch:
+    """가족이 보낸 사진을 뒤에서 받아 화면 크기로 줄여 둔다(rag_sync.prepare_display_photo).
+
+    메시지를 받자마자 시작하면, 모리가 "사진을 보냈어요" 하고 말하는 동안 다 받아 둔다.
+    전에는 다 말한 뒤에야 화면이 S3(미국)에서 원본을 받기 시작해 1~4초 늦게 떴다.
+    """
+
+    def __init__(self, url: str):
+        self.url = url
+        self._path = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        self._path = prepare_display_photo(self.url)
+
+    def uri(self, timeout: float = 3.0) -> str:
+        """띄울 주소. 받아 둔 파일이 있으면 그것, 아직이거나 실패했으면 S3 주소."""
+        self._thread.join(timeout)
+        return self._path.as_uri() if self._path else self.url
+
+
+def _deliver_chat(m: dict, face=None, intro: str = "", cue: bool = True,
+                  photo: _PhotoPrefetch | None = None) -> None:
     """가족 메시지 하나를 인형이 전한다. 글=TTS, 사진=화면(PHOTO_DISPLAY_SEC 초).
 
     intro: 메시지 앞에 먼저 할 말("메시지가 3개 왔어요.").
     cue: 알림음을 낼지. 여러 개를 이어 읽을 땐 첫 메시지에만 낸다.
+    photo: 미리 받기 시작한 사진(_deliver_chats). 없으면 S3 주소를 그대로 띄운다.
     """
     content = (m.get("content") or "").strip()
     image_url = m.get("imageUrl")
@@ -1576,7 +1601,7 @@ def _deliver_chat(m: dict, face=None, intro: str = "", cue: bool = True) -> None
     if face:
         try:
             if image_url:
-                _show_photo_for_a_while(face, image_url)
+                _show_photo_for_a_while(face, photo.uri() if photo else image_url)
             else:
                 # 글만 온 메시지였다면, 안내에 가려졌던 사진을 다시 보여준다.
                 _restore_photo_if_any(face)
@@ -1784,11 +1809,14 @@ def _deliver_chats(msgs: list[dict], headers: dict, face=None,
 
     first: 이번 묶음이 처음 읽는 것인지. 알림음과 "N개 왔어요" 는 처음에만 한다.
     """
+    # 사진은 읽기 시작하기 전에 한꺼번에 받기 시작한다(읽는 동안 다 받아 둔다).
+    photos = {i: _PhotoPrefetch(m["imageUrl"]) for i, m in enumerate(msgs)
+              if m.get("imageUrl") and face}
     for i, m in enumerate(msgs):
         intro = ""
         if first and i == 0 and len(msgs) > 1:
             intro = f"가족 대화방에 메시지가 {len(msgs)}개 왔어요. 차례로 읽어드릴게요."
-        _deliver_chat(m, face, intro=intro, cue=(first and i == 0))
+        _deliver_chat(m, face, intro=intro, cue=(first and i == 0), photo=photos.get(i))
     requests.post(
         f"{REMORY_API}/devices/{DEVICE_ID}/chat/delivered",
         json={"messageIds": [m["messageId"] for m in msgs]},
