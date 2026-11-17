@@ -581,12 +581,30 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
          "-D", SPEAKER_ALSA_DEVICE, "-"],
         stdin=subprocess.PIPE
     )
+    # 목소리가 실제로 들리기 시작하는 시각. 효과음이 앞에 있으면 그게 끝난 뒤다.
+    voice_at = time.perf_counter()
     if lead_pcm:
         proc.stdin.write(lead_pcm)      # 파이프에 바로 들어가고, aplay 가 곧 낸다
         proc.stdin.flush()
+        voice_at += len(lead_pcm) / (sample_rate * 2)
     if before_play:
         before_play()
 
+    start_timer: list[threading.Timer] = []
+
+    def voice_started():
+        """on_start(얼굴이 말하기 시작)를 목소리가 들리는 때에 맞춘다. 목소리를 재생기에
+        넘기는 건 효과음이 나오는 중일 수 있는데, 그때 입이 먼저 움직이면 어색하다."""
+        if not on_start:
+            return
+        wait = voice_at - time.perf_counter()
+        if wait > 0.03:
+            t = threading.Timer(wait, on_start)
+            t.daemon = True
+            start_timer.append(t)
+            t.start()
+        else:
+            on_start()
     t_ready = time.perf_counter()
 
     def stopped():
@@ -616,8 +634,7 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
                 buf = b""
                 started = True
                 t_first = time.perf_counter()
-                if on_start:
-                    on_start()
+                voice_started()
         else:
             proc.stdin.write(chunk)
 
@@ -625,8 +642,7 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
         if not started and buf:
             proc.stdin.write(buf)
             t_first = time.perf_counter()
-            if on_start:
-                on_start()
+            voice_started()
         proc.stdin.close()
         # 다 받아도 aplay 는 쌓인 소리를 몇 초 더 낸다. 그동안에도 멈출 수 있게 한다.
         if stop_event is None:
@@ -638,6 +654,9 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
                     break
 
     if interrupted:
+        # 효과음 중에 멈췄으면 얼굴이 말하기 시작하지 않게 한다(말하는 얼굴로 남는다).
+        for t in start_timer:
+            t.cancel()
         proc.kill()
         proc.wait()
         try:
