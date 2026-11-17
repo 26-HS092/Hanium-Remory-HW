@@ -318,7 +318,9 @@
       else if(m.cmd==="ask")showAsk(m.id,m.title,m.sub);
       else if(m.cmd==="ask_hide")hideAsk();};
     // 앱이 다시 켜지는 중이면 로딩 화면을 다시 덮는다. 잠깐 끊긴 거면 깜빡이지 않게 조금 기다린다.
+    // 앱이 말하던 중에 꺼지면 "말 끝" 신호가 안 와서 입이 계속 움직였다. 끊기면 그친다.
     ws.onclose=function(){clearTimeout(loadTimer);
+      speaking=false;listenStop();thinkStop();
       loadTimer=setTimeout(function(){loadEl.classList.remove("gone");},3000);
       setTimeout(connect,1000);};
     ws.onerror=function(){try{ws.close();}catch(e){}};

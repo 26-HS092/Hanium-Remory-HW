@@ -25,6 +25,7 @@ class FaceDisplay2:
         self._ready_app = False      # 앱 준비가 끝났는지. 끝나기 전엔 화면이 로딩을 띄운다.
         self._listening = False
         self._thinking = False
+        self._speaking = False
         self._notice = None          # (제목, 부제) — 안내가 떠 있는 동안만
         # 화면에서 묻는 중인 질문 (id, 제목, 부제) 과 눌린 답. 답은 브라우저가
         # 보내오고 ask_wait 가 꺼내 간다.
@@ -57,10 +58,11 @@ class FaceDisplay2:
                                          ensure_ascii=False))
                 if self._ready_app:
                     await ws.send(json.dumps({"cmd": "ready"}))
-                if self._listening:
-                    await ws.send(json.dumps({"cmd": "listen_start"}))
-                if self._thinking:
-                    await ws.send(json.dumps({"cmd": "think_start"}))
+                # 꺼져 있는 상태도 보낸다. 앱이 말하던 중에 다시 켜지면 화면엔
+                # "말하는 중" 이 남아 입이 계속 움직였다.
+                for on, cmd in ((self._speaking, "speak"), (self._listening, "listen"),
+                                (self._thinking, "think")):
+                    await ws.send(json.dumps({"cmd": f"{cmd}_{'start' if on else 'stop'}"}))
                 if self._notice:
                     title, sub, icon = self._notice
                     await ws.send(json.dumps(
@@ -177,9 +179,11 @@ class FaceDisplay2:
 
     def start_speaking(self):
         self._thinking = False
+        self._speaking = True
         self._send({"cmd": "speak_start"})
 
     def stop_speaking(self):
+        self._speaking = False
         self._send({"cmd": "speak_stop"})
 
     def show_notice(self, title: str, sub: str = "", icon: str = "pill"):
@@ -248,6 +252,7 @@ class FaceDisplay2:
     def close(self):
         self._listening = False
         self._thinking = False
+        self._speaking = False
         self._notice = None
         self._ask = None
         self._send({"cmd": "ask_hide"})

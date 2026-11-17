@@ -289,7 +289,7 @@ def make_chime_wav(path: str, notes, decay: float = 0.16,
 
 def synthesize_and_play_stream(text, url, key, sample_rate=24000, buffer_bytes=96000,
                                on_start=None, spk_id=None, stop_event=None,
-                               before_play=None):
+                               before_play=None, lead_pcm=None):
     """PCM을 백그라운드 스레드로 미리 받아 쌓아두고 재생. 네트워크 흔들림을 흡수한다.
 
     spk_id: 어떤 화자(목소리)로 합성할지. None 이면 서버 기본 목소리(caregiver).
@@ -303,7 +303,7 @@ def synthesize_and_play_stream(text, url, key, sample_rate=24000, buffer_bytes=9
                              stream=True, timeout=60)
 
     return _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, "TTS",
-                            stop_event, before_play)
+                            stop_event, before_play, lead_pcm)
 
 
 # 🗂️ 정해진 문장(인사·안전 답 등)의 Fish 합성 결과를 모아 두는 곳. 문장·목소리·모델이
@@ -502,7 +502,8 @@ class FishLiveConnection:
 
 
 def synthesize_and_play_fish_live(sentences, conn: FishLiveConnection, buffer_bytes=24000,
-                                  on_start=None, stop_event=None, before_play=None):
+                                  on_start=None, stop_event=None, before_play=None,
+                                  lead_pcm=None):
     """글이 다 나오기 전에 말하기 시작한다. sentences 는 문장을 차례로 내주는 iterable.
 
     LLM 답을 받는 대로 넘기면, 답이 다 만들어지기를 기다리지 않고 첫 문장부터 말한다.
@@ -510,13 +511,13 @@ def synthesize_and_play_fish_live(sentences, conn: FishLiveConnection, buffer_by
     같다(캐시는 없다 — LLM 답은 다시 나오지 않는다).
     """
     return _stream_and_play(lambda: conn.bind(sentences), conn.sample_rate, buffer_bytes,
-                            on_start, "TTS(Fish 실시간)", stop_event, before_play)
+                            on_start, "TTS(Fish 실시간)", stop_event, before_play, lead_pcm)
 
 
 def synthesize_and_play_fish(text, key, reference_id=None, model=None,
                              sample_rate=24000, buffer_bytes=24000,
                              latency="balanced", on_start=None, stop_event=None,
-                             before_play=None, cache=False):
+                             before_play=None, cache=False, lead_pcm=None):
     """Fish Audio 클라우드 TTS(https://api.fish.audio/v1/tts)로 스트리밍 재생.
 
     reference_id: Fish Audio 에서 고른/만든 목소리 모델 ID. None 이면 Fish 기본 목소리.
@@ -531,24 +532,27 @@ def synthesize_and_play_fish(text, key, reference_id=None, model=None,
     path = _fish_cache_path(text, reference_id, model, sample_rate, latency)
     if path.exists():
         return _stream_and_play(lambda: _CachedResponse(path), sample_rate, buffer_bytes,
-                                on_start, "TTS(Fish 캐시)", stop_event, before_play)
+                                on_start, "TTS(Fish 캐시)", stop_event, before_play, lead_pcm)
 
     def open_stream():
         r = _fish_post(text, key, reference_id, model, sample_rate, latency, stream=True)
         return _CachingResponse(r, path) if cache else r
 
     return _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, "TTS(Fish)",
-                            stop_event, before_play)
+                            stop_event, before_play, lead_pcm)
 
 
 def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
-                     stop_event=None, before_play=None):
+                     stop_event=None, before_play=None, lead_pcm=None):
     """open_stream() 이 돌려준 PCM 스트리밍 응답을 백그라운드로 받으며 aplay 로 재생.
 
     stop_event 가 켜지면 aplay 를 죽여 바로 조용해지고 {"interrupted": True} 를
     돌려준다. 받던 스트림은 내버려 둔다(데몬 스레드라 혼자 끝난다).
-    before_play 는 받기를 시작한 뒤, 재생 전에 부른다(표정 음악 등). 그동안 서버가
+    before_play 는 받기를 시작한 뒤, 재생 전에 부른다(마이크 열기 등). 그동안 서버가
     합성한 소리가 쌓여 있어서, 끝나자마자 바로 말한다.
+    lead_pcm 은 목소리 앞에 낼 소리(표정 음악, sample_rate·16bit 모노). 목소리와 같은
+    aplay 로 낸다 — 따로 aplay 를 열면 장치를 열고 비우는 데만 0.25초쯤 더 걸리고
+    음악과 목소리 사이가 뜬다. 음악이 나오는 동안 before_play 와 합성이 함께 돈다.
     """
     t0 = time.perf_counter()
     q = queue.Queue()
@@ -572,15 +576,36 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
             q.put(None)
 
     threading.Thread(target=downloader, daemon=True).start()
-    if before_play:
-        before_play()
-    t_ready = time.perf_counter()
-
     proc = subprocess.Popen(
         ["aplay", "-q", "-f", "S16_LE", "-r", str(sample_rate), "-c", "1",
          "-D", SPEAKER_ALSA_DEVICE, "-"],
         stdin=subprocess.PIPE
     )
+    # 목소리가 실제로 들리기 시작하는 시각. 효과음이 앞에 있으면 그게 끝난 뒤다.
+    voice_at = time.perf_counter()
+    if lead_pcm:
+        proc.stdin.write(lead_pcm)      # 파이프에 바로 들어가고, aplay 가 곧 낸다
+        proc.stdin.flush()
+        voice_at += len(lead_pcm) / (sample_rate * 2)
+    if before_play:
+        before_play()
+
+    start_timer: list[threading.Timer] = []
+
+    def voice_started():
+        """on_start(얼굴이 말하기 시작)를 목소리가 들리는 때에 맞춘다. 목소리를 재생기에
+        넘기는 건 효과음이 나오는 중일 수 있는데, 그때 입이 먼저 움직이면 어색하다."""
+        if not on_start:
+            return
+        wait = voice_at - time.perf_counter()
+        if wait > 0.03:
+            t = threading.Timer(wait, on_start)
+            t.daemon = True
+            start_timer.append(t)
+            t.start()
+        else:
+            on_start()
+    t_ready = time.perf_counter()
 
     def stopped():
         return stop_event is not None and stop_event.is_set()
@@ -609,8 +634,7 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
                 buf = b""
                 started = True
                 t_first = time.perf_counter()
-                if on_start:
-                    on_start()
+                voice_started()
         else:
             proc.stdin.write(chunk)
 
@@ -618,8 +642,7 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
         if not started and buf:
             proc.stdin.write(buf)
             t_first = time.perf_counter()
-            if on_start:
-                on_start()
+            voice_started()
         proc.stdin.close()
         # 다 받아도 aplay 는 쌓인 소리를 몇 초 더 낸다. 그동안에도 멈출 수 있게 한다.
         if stop_event is None:
@@ -631,6 +654,9 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
                     break
 
     if interrupted:
+        # 효과음 중에 멈췄으면 얼굴이 말하기 시작하지 않게 한다(말하는 얼굴로 남는다).
+        for t in start_timer:
+            t.cancel()
         proc.kill()
         proc.wait()
         try:
@@ -649,8 +675,11 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
     if box["ttfb"] is None:
         box["ttfb"] = box["dl_done"]
     audio_sec = box["bytes"] / (sample_rate * 2)
-    # 앞소리가 있으면 첫소리는 그게 끝난 뒤부터 잰다. 어르신이 실제로 기다리는 시간이다.
+    # 앞소리(before_play)가 있으면 첫소리는 그게 끝난 뒤부터 잰다. 효과음(lead_pcm)은
+    # 그동안 함께 나오므로, 목소리는 효과음 길이와 (앞소리+첫소리) 중 늦은 쪽에 나온다.
     before = f" | 앞소리 {(t_ready - t0):.2f}s" if before_play else ""
+    if lead_pcm:
+        before = f" | 효과음 {len(lead_pcm) / (sample_rate * 2):.2f}s" + before
     print(
         f"   ⏱  {label}  서버첫청크 {(box['ttfb'] - t0):.2f}s{before}"
         f" | 첫소리 {(t_first - t_ready):.2f}s"

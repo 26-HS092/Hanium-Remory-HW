@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import shutil
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -63,27 +64,37 @@ def display_photo_path(url: str) -> Path:
     return DISPLAY_DIR / f"{_hash(url.split('?', 1)[0])}.jpg"
 
 
+def prepare_display_photo(url: str) -> Path | None:
+    """사진을 받아 화면 크기로 줄여 둔 파일. 이미 있으면 받지 않는다. 실패하면 None.
+
+    추억 사진(동기화 때)과 가족이 보낸 사진(받는 대로) 둘 다 쓴다.
+    """
+    from io import BytesIO
+    from PIL import Image, ImageOps
+    dest = display_photo_path(url)
+    if dest.exists():
+        return dest
+    try:
+        resp = requests.get(url, timeout=60)
+        resp.raise_for_status()
+        img = ImageOps.exif_transpose(Image.open(BytesIO(resp.content)))
+        img.thumbnail(DISPLAY_SIZE)
+        DISPLAY_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(f"{dest.stem}.{os.getpid()}.{threading.get_ident()}.part")
+        img.convert("RGB").save(tmp, "JPEG", quality=88)
+        tmp.replace(dest)
+        return dest
+    except Exception as e:
+        print(f"⚠️  화면용 사진 만들기 실패: {e}")
+        return None
+
+
 def _prepare_display_photos(urls) -> None:
     """화면용 사진이 없는 것만 받아 화면 크기로 줄여 둔다."""
-    from PIL import Image, ImageOps
     made = 0
     for url in urls:
-        dest = display_photo_path(url)
-        if dest.exists():
-            continue
-        try:
-            resp = requests.get(url, timeout=60)
-            resp.raise_for_status()
-            from io import BytesIO
-            img = ImageOps.exif_transpose(Image.open(BytesIO(resp.content)))
-            img.thumbnail(DISPLAY_SIZE)
-            DISPLAY_DIR.mkdir(parents=True, exist_ok=True)
-            tmp = dest.with_suffix(".part")
-            img.convert("RGB").save(tmp, "JPEG", quality=88)
-            tmp.replace(dest)
+        if not display_photo_path(url).exists() and prepare_display_photo(url):
             made += 1
-        except Exception as e:
-            print(f"⚠️  화면용 사진 만들기 실패: {e}")
     if made:
         print(f"🖼️  화면용 사진 {made}장 준비")
 

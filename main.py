@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import queue
+import random
 import re
 import requests
 import threading
@@ -34,7 +35,6 @@ import time
 from pathlib import Path
 from typing import TypedDict, Literal
 import subprocess
-import tempfile
 import wave
 
 import numpy as np
@@ -199,6 +199,7 @@ elif STT_ENGINE == "groq":
 else:
     from stt4vad_hat import STTHandler              # noqa: E402
 from retriever import build_context_prompt, find_related_photo  # noqa: E402
+from rag_sync import prepare_display_photo  # noqa: E402
 from datamark import new_mark, strip_marks, instruction as datamark_instruction  # noqa: E402
 from conversation_log import ConversationLogger  # noqa: E402
 from stt_keywords import boost_words              # noqa: E402
@@ -843,20 +844,68 @@ def _patient_profile() -> str:
             "모른다고 하세요.\n" + "\n".join(lines))
 
 
-def wake_greeting(now: datetime.datetime | None = None) -> str:
-    """불러 주셨을 때 먼저 건네는 인사. 시간대에 맞춰 안부를 여쭌다."""
-    hour = (now or datetime.datetime.now()).hour
-    name = _patient_name()
-    who = f"{name}님" if name else "어르신"
+# 시간대별 안부. 그 시간대에 처음 불러 주셨을 때 하나를 골라 여쭌다.
+_SLOT_GREETINGS = {
+    "아침": ["좋은 아침이에요, {who}! 밤새 잘 주무셨어요?",
+            "{who}, 좋은 아침이에요! 아침은 드셨어요?",
+            "안녕히 주무셨어요, {who}? 오늘 기분은 어떠세요?"],
+    "점심": ["좋은 오후예요, {who}! 점심은 맛있게 드셨어요?",
+            "{who}, 점심 진지는 드셨어요?"],
+    "오후": ["좋은 오후예요, {who}! 오늘 하루는 어떻게 보내고 계세요?",
+            "{who}, 오후 잘 보내고 계세요?"],
+    "저녁": ["좋은 저녁이에요, {who}! 저녁 진지는 드셨어요?",
+            "{who}, 벌써 저녁이네요. 오늘 하루 어떠셨어요?"],
+    "밤": ["{who}, 밤이 늦었네요. 잠이 잘 안 오세요?",
+          "{who}, 아직 안 주무셨네요. 무슨 생각 하고 계셨어요?"],
+}
+# 같은 시간대에 또 불러 주시면 안부를 되풀이하지 않고 짧게 대답한다. 저녁에 다섯 번
+# 부르시면 다섯 번 다 "저녁 진지는 드셨어요?" 하고 여쭙는 게 어색했다.
+_SHORT_GREETINGS = ["네, {who}! 부르셨어요?",
+                    "네, 모리 여기 있어요. 무슨 이야기 할까요?",
+                    "네, 말씀하세요, {who}.",
+                    "네, {who}. 듣고 있어요."]
+# 안부를 여쭌 시간대(날짜, 시간대)와 마지막으로 한 인사. 메인 루프에서만 바꾼다.
+_greeted: dict = {"slot": None, "last": None}
+
+
+def _greeting_slot(hour: int) -> str:
     if 5 <= hour < 11:
-        return f"좋은 아침이에요, {who}! 밤새 잘 주무셨어요?"
+        return "아침"
     if 11 <= hour < 14:
-        return f"좋은 오후예요, {who}! 점심은 맛있게 드셨어요?"
+        return "점심"
     if 14 <= hour < 18:
-        return f"좋은 오후예요, {who}! 오늘 하루는 어떻게 보내고 계세요?"
+        return "오후"
     if 18 <= hour < 22:
-        return f"좋은 저녁이에요, {who}! 저녁 진지는 드셨어요?"
-    return f"{who}, 밤이 늦었네요. 잠이 잘 안 오세요?"
+        return "저녁"
+    return "밤"
+
+
+def _patient_who() -> str:
+    name = _patient_name()
+    return f"{name}님" if name else "어르신"
+
+
+def wake_greeting(now: datetime.datetime | None = None) -> str:
+    """불러 주셨을 때 먼저 건네는 인사. 그 시간대에 처음이면 안부를 여쭙고, 이미
+    여쭸으면 짧게 대답한다. 바로 전에 한 인사와 같은 말은 피한다."""
+    now = now or datetime.datetime.now()
+    slot = (now.date(), _greeting_slot(now.hour))
+    first = _greeted["slot"] != slot
+    pool = _SLOT_GREETINGS[slot[1]] if first else _SHORT_GREETINGS
+    who = _patient_who()
+    choices = [g.format(who=who) for g in pool]
+    if len(choices) > 1 and _greeted["last"] in choices:
+        choices.remove(_greeted["last"])
+    greeting = random.choice(choices)
+    _greeted.update(slot=slot, last=greeting)
+    return greeting
+
+
+def _all_greetings() -> set[str]:
+    """나올 수 있는 인사 전부(목소리를 미리 합성해 둔다)."""
+    who = _patient_who()
+    pools = [*_SLOT_GREETINGS.values(), _SHORT_GREETINGS]
+    return {g.format(who=who) for pool in pools for g in pool}
 
 
 # 정해진 말. 목소리를 미리 합성해 두는 문장(_cached_phrases)이라 상수로 둔다.
@@ -867,10 +916,7 @@ ASK_AGAIN_REPLY = "제대로 듣지 못했어요. 다시 한번 말씀해 주시
 def _cached_phrases() -> set[str]:
     """TTS 결과를 캐시해 두는 정해진 문장. 시간대별 인사, 안전 판별의 정해진 답,
     다시 여쭙는 말. 부르자마자 하는 인사와 안전 답은 늦으면 안 되는 말이다."""
-    today = datetime.date.today()
-    greetings = {wake_greeting(datetime.datetime.combine(today, datetime.time(h)))
-                 for h in (6, 12, 15, 19, 23)}
-    return greetings | set(safety.fixed_replies()) | {ASK_AGAIN, ASK_AGAIN_REPLY}
+    return _all_greetings() | set(safety.fixed_replies()) | {ASK_AGAIN, ASK_AGAIN_REPLY}
 
 
 def prewarm_tts() -> None:
@@ -881,14 +927,17 @@ def prewarm_tts() -> None:
                  reference_id=_fish_reference_id(), model=FISH_MODEL, latency=FISH_LATENCY)
 
 
-def _open_mic_tap(barge: threading.Event | None = None) -> MicTap | None:
+def _open_mic_tap(barge: threading.Event | None = None,
+                  extra_grace_ms: int = 0) -> MicTap | None:
     """인형이 말하는 동안 마이크를 미리 연다. 못 열면 None(그러면 말이 끝난 뒤에 연다).
 
     barge 를 주고 BARGE_IN 이 켜져 있으면, 말씀하시며 끼어들 때 barge 를 켠다.
+    extra_grace_ms: 목소리 앞에 음악이 먼저 나가면 그 길이. 끼어들기를 그만큼 늦게 본다.
     """
     try:
         return MicTap(input_device_index=MIC_DEVICE_INDEX,
-                      barge=(barge if BARGE_IN else None))
+                      barge=(barge if BARGE_IN else None),
+                      grace_ms=MicTap.BARGE_IN_GRACE_MS + extra_grace_ms)
     except Exception as e:
         print(f"⚠️  말끝 겹쳐 듣기 마이크 열기 실패: {e}")
         return None
@@ -916,23 +965,25 @@ def _fish_reference_id() -> str | None:
     return FISH_REFERENCE_ID
 
 
-def tts_play(text: str, on_start=None, stop_event=None, before_play=None) -> None:
+def tts_play(text: str, on_start=None, stop_event=None, before_play=None,
+             lead_pcm: bytes | None = None) -> None:
     """TTS_ENGINE 에 맞는 엔진으로 text 를 합성하며 바로 재생한다.
 
     stop_event 가 켜지면 말하다가도 멈춘다. before_play 는 합성을 맡긴 뒤
-    말하기 전에 부른다 — 표정 음악이 나오는 동안 목소리를 미리 받아 둔다.
+    말하기 전에 부른다. lead_pcm(표정 음악)은 목소리 앞에 같은 재생으로 이어 낸다 —
+    음악이 나오는 동안 목소리를 미리 받아 둔다.
     """
     if TTS_ENGINE == "fish":
         synthesize_and_play_fish(text, FISH_API_KEY, reference_id=_fish_reference_id(),
                                  model=FISH_MODEL, latency=FISH_LATENCY,
                                  on_start=on_start, stop_event=stop_event,
                                  before_play=before_play,
-                                 cache=text in _cached_phrases())
+                                 cache=text in _cached_phrases(), lead_pcm=lead_pcm)
     else:
         synthesize_and_play_stream(text, TTS_STREAM_API_URL, TTS_API_KEY,
                                    spk_id=device_settings.get("spk_id"),
                                    on_start=on_start, stop_event=stop_event,
-                                   before_play=before_play)
+                                   before_play=before_play, lead_pcm=lead_pcm)
 
 
 def open_live_tts() -> FishLiveConnection | None:
@@ -944,9 +995,11 @@ def open_live_tts() -> FishLiveConnection | None:
 
 
 def tts_play_stream(reply_stream: "_ReplyStream", conn: FishLiveConnection,
-                    on_start=None, stop_event=None, before_play=None) -> None:
+                    on_start=None, stop_event=None, before_play=None,
+                    lead_pcm: bytes | None = None) -> None:
     """LLM 답을 받는 대로 말한다(Fish 실시간, conn 은 open_live_tts). 소리가 나기 전에
-    실패하면 답을 다 받아 tts_play 로 말한다. before_play 는 이미 불렸으니 다시 안 부른다."""
+    실패하면 답을 다 받아 tts_play 로 말한다. before_play 와 표정 음악(lead_pcm)은
+    이미 냈으니 다시 안 낸다."""
     started = threading.Event()
 
     def _on_start():
@@ -956,7 +1009,8 @@ def tts_play_stream(reply_stream: "_ReplyStream", conn: FishLiveConnection,
 
     try:
         synthesize_and_play_fish_live(reply_stream.sentences(), conn, on_start=_on_start,
-                                      stop_event=stop_event, before_play=before_play)
+                                      stop_event=stop_event, before_play=before_play,
+                                      lead_pcm=lead_pcm)
     except Exception as e:
         if started.is_set():
             raise
@@ -1176,43 +1230,36 @@ _EXPRESSION_JINGLES = {
 # 준비된다 — 그보다 길게 틀면 그만큼 대답이 늦어진다(원래 길이 0.9~2.1초).
 JINGLE_SEC = 0.6
 JINGLE_FADE_SEC = 0.15
-_SHORT_JINGLE_DIR = Path(tempfile.gettempdir()) / "mori_jingles"
+TTS_SAMPLE_RATE = 24000          # Fish·CosyVoice 모두 이 빠르기의 PCM 으로 받는다
+_jingle_cache: dict[str, bytes] = {}
 
 
-def _short_jingle(path: Path) -> Path:
-    """path 의 앞 JINGLE_SEC 초를 끝을 줄여 가며 자른 wav. 실패하면 원래 파일."""
-    out = _SHORT_JINGLE_DIR / f"{path.stem}_{int(JINGLE_SEC * 1000)}ms.wav"
-    try:
-        if out.exists() and out.stat().st_mtime >= path.stat().st_mtime:
-            return out
-        with wave.open(str(path)) as w:
-            rate, ch, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
-            x = np.frombuffer(w.readframes(int(rate * JINGLE_SEC)), dtype=np.int16)
-        x = x.reshape(-1, ch).astype(np.float32)
-        fade = min(len(x), int(rate * JINGLE_FADE_SEC))
-        x[-fade:] *= np.linspace(1.0, 0.0, fade)[:, None]
-        _SHORT_JINGLE_DIR.mkdir(exist_ok=True)
-        with wave.open(str(out), "wb") as w:
-            w.setnchannels(ch)
-            w.setsampwidth(width)
-            w.setframerate(rate)
-            w.writeframes(x.astype(np.int16).tobytes())
-        return out
-    except Exception as e:
-        print(f"⚠️  {path.name} 줄이기 실패: {e} — 원래 길이로 튼다")
-        return path
+def _jingle_pcm(expression: str, rate: int = TTS_SAMPLE_RATE) -> bytes | None:
+    """그 표정의 음악 앞 JINGLE_SEC 초를 끝을 줄여 가며, rate·16bit 모노 PCM 으로.
 
-
-def _play_expression_jingle(expression: str) -> None:
-    """답을 말하기 전에 그 표정의 음악을 낸다. 스피커 잠금은 부르는 쪽이 쥔다."""
+    목소리와 같은 aplay 로 이어 낸다(lead_pcm). 따로 aplay 를 열면 0.6초 음악에
+    0.8~0.9초가 걸렸다 — 장치를 열고 비우는 시간이 붙는다. 없거나 못 읽으면 None.
+    """
     path = _EXPRESSION_JINGLES.get(expression)
     if not path:
-        return
-    path = _short_jingle(path)
+        return None
+    if expression in _jingle_cache:
+        return _jingle_cache[expression]
     try:
-        play_wav(str(path))
+        with wave.open(str(path)) as w:
+            src, ch = w.getframerate(), w.getnchannels()
+            x = np.frombuffer(w.readframes(int(src * JINGLE_SEC)), dtype=np.int16)
+        x = x.reshape(-1, ch).mean(axis=1)
+        t = np.arange(int(len(x) * rate / src)) * src / rate
+        y = np.interp(t, np.arange(len(x)), x)
+        fade = min(len(y), int(rate * JINGLE_FADE_SEC))
+        y[-fade:] *= np.linspace(1.0, 0.0, fade)
+        pcm = y.astype(np.int16).tobytes()
     except Exception as e:
-        print(f"⚠️  {expression} 음악 재생 실패: {e}")
+        print(f"⚠️  {expression} 음악 읽기 실패: {e}")
+        return None
+    _jingle_cache[expression] = pcm
+    return pcm
 
 
 def _think_start(face=None) -> None:
@@ -1485,11 +1532,35 @@ def _sender_label(m: dict) -> str:
     return "가족"
 
 
-def _deliver_chat(m: dict, face=None, intro: str = "", cue: bool = True) -> None:
+class _PhotoPrefetch:
+    """가족이 보낸 사진을 뒤에서 받아 화면 크기로 줄여 둔다(rag_sync.prepare_display_photo).
+
+    메시지를 받자마자 시작하면, 모리가 "사진을 보냈어요" 하고 말하는 동안 다 받아 둔다.
+    전에는 다 말한 뒤에야 화면이 S3(미국)에서 원본을 받기 시작해 1~4초 늦게 떴다.
+    """
+
+    def __init__(self, url: str):
+        self.url = url
+        self._path = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        self._path = prepare_display_photo(self.url)
+
+    def uri(self, timeout: float = 3.0) -> str:
+        """띄울 주소. 받아 둔 파일이 있으면 그것, 아직이거나 실패했으면 S3 주소."""
+        self._thread.join(timeout)
+        return self._path.as_uri() if self._path else self.url
+
+
+def _deliver_chat(m: dict, face=None, intro: str = "", cue: bool = True,
+                  photo: _PhotoPrefetch | None = None) -> None:
     """가족 메시지 하나를 인형이 전한다. 글=TTS, 사진=화면(PHOTO_DISPLAY_SEC 초).
 
     intro: 메시지 앞에 먼저 할 말("메시지가 3개 왔어요.").
     cue: 알림음을 낼지. 여러 개를 이어 읽을 땐 첫 메시지에만 낸다.
+    photo: 미리 받기 시작한 사진(_deliver_chats). 없으면 S3 주소를 그대로 띄운다.
     """
     content = (m.get("content") or "").strip()
     image_url = m.get("imageUrl")
@@ -1530,7 +1601,7 @@ def _deliver_chat(m: dict, face=None, intro: str = "", cue: bool = True) -> None
     if face:
         try:
             if image_url:
-                _show_photo_for_a_while(face, image_url)
+                _show_photo_for_a_while(face, photo.uri() if photo else image_url)
             else:
                 # 글만 온 메시지였다면, 안내에 가려졌던 사진을 다시 보여준다.
                 _restore_photo_if_any(face)
@@ -1738,11 +1809,14 @@ def _deliver_chats(msgs: list[dict], headers: dict, face=None,
 
     first: 이번 묶음이 처음 읽는 것인지. 알림음과 "N개 왔어요" 는 처음에만 한다.
     """
+    # 사진은 읽기 시작하기 전에 한꺼번에 받기 시작한다(읽는 동안 다 받아 둔다).
+    photos = {i: _PhotoPrefetch(m["imageUrl"]) for i, m in enumerate(msgs)
+              if m.get("imageUrl") and face}
     for i, m in enumerate(msgs):
         intro = ""
         if first and i == 0 and len(msgs) > 1:
             intro = f"가족 대화방에 메시지가 {len(msgs)}개 왔어요. 차례로 읽어드릴게요."
-        _deliver_chat(m, face, intro=intro, cue=(first and i == 0))
+        _deliver_chat(m, face, intro=intro, cue=(first and i == 0), photo=photos.get(i))
     requests.post(
         f"{REMORY_API}/devices/{DEVICE_ID}/chat/delivered",
         json={"messageIds": [m["messageId"] for m in msgs]},
@@ -2479,15 +2553,17 @@ def main() -> None:
                     # 말씀하시며 끼어드시면 켜진다(MicTap). 안전 신호에 대한 답은
                     # 끝까지 한다 — 그보다 급한 말은 없다.
                     barge = None if risk else threading.Event()
+                    # 표정 음악은 목소리와 같은 재생으로 앞에 붙여 낸다(lead_pcm).
+                    jingle = _jingle_pcm(robot_expr) if play_jingle else None
+                    jingle_ms = (len(jingle) * 1000 // (TTS_SAMPLE_RATE * 2)) if jingle else 0
 
-                    # 목소리 합성을 먼저 맡기고, 음악은 그동안 낸다.
+                    # 음악이 나오는 동안 목소리를 받고 마이크를 연다.
                     def before_speaking():
                         nonlocal mic_tap
-                        if play_jingle:
-                            _play_expression_jingle(robot_expr)
                         # 말하는 동안 마이크를 미리 열어 둔다. 말끝과 겹쳐 대답하셔도
-                        # 듣는다. 음악이 담기지 않게 음악이 끝난 뒤에 연다.
-                        mic_tap = _open_mic_tap(barge)
+                        # 듣는다. 음악과 함께 열리니, 끼어들기를 안 보는 시간에 음악
+                        # 길이를 더한다(모리 목소리가 시작된 뒤 BARGE_IN_GRACE_MS 동안).
+                        mic_tap = _open_mic_tap(barge, extra_grace_ms=jingle_ms)
 
                     with timed("TTS 스트리밍", timings):
                         speak_args = dict(
@@ -2496,6 +2572,7 @@ def main() -> None:
                             # 대한 답은 끝까지 한다 — 그보다 급한 말은 없다.
                             stop_event=(None if risk else _AnyEvent(tts_stop, barge)),
                             before_play=before_speaking,
+                            lead_pcm=jingle,
                         )
                         if reply_stream is not None:
                             tts_play_stream(reply_stream, live_tts, **speak_args)
