@@ -185,5 +185,21 @@ if not (_r and _r.kind == safety.SELF_HARM):
     fails += 1
 print(f"  {OK if _r else NG} IDIOM_GUARD 기본값 꺼짐")
 
+print("\n[말뭉치 오탐] 감성대화 말뭉치에서 잘못 걸렸던 것")
+expect("이가 튼튼해서 고기를 잘 씹을 수 있어", None, "씹 ≠ 욕")
+expect("전염병 때문에 친구들을 못 만나서 괴로워", None, "전염병 ≠ 염병")
+expect("서로에게 무슨 일이 닥쳐도 같이 힘이 되어 줄 거야", None, "닥쳐도 ≠ 닥쳐")
+expect("의사가 급하게 수술을 해야 된다고 했어", None, "걱정이지 판단 요청이 아니다")
+expect("친구가 자살했다는 게 믿기지 않아", None, "남 이야기 — LLM 몫")
+expect("나는 죽고 싶지 않아서 안절부절못해", None, "부정")
+print("\n[말뭉치 오탐] 고치면서 놓치면 안 되는 것")
+expect("이 씹새끼야", safety.PROFANITY)
+expect("닥쳐!", safety.PROFANITY)
+expect("염병하네", safety.PROFANITY)
+expect("수술 꼭 해야 하나", safety.MEDICAL)
+expect("수술 안 해도 되지?", safety.MEDICAL)
+expect("자살이나 할까", safety.SELF_HARM)
+expect("죽고 싶어", safety.SELF_HARM)
+
 print(f"\n{'모두 통과' if fails == 0 else str(fails) + '건 실패'}")
 raise SystemExit(1 if fails else 0)
