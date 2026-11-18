@@ -14,10 +14,13 @@ stt4vad.py 의 VAD 알고리즘을 스트리밍 버전으로 이식.
     조용히 있을 때 찍히는 e 값보다 살짝 높게 min_energy_threshold 를 잡으면 된다.
 """
 
+import json
 import os
 import queue
+import shutil
 import struct
 import threading
+import time
 import wave
 from collections import deque
 from difflib import SequenceMatcher
@@ -28,6 +31,20 @@ import webrtcvad
 
 # 켜면 프레임마다 에너지/VAD 판정을 출력한다(문턱값 보정용).
 VAD_DEBUG = bool(os.getenv("VAD_DEBUG"))
+
+# 발화마다 말끝 판단 기록을 남긴다(말이 중간에 잘리거나 너무 늦게 끝날 때 원인 보기).
+#   logs/vad_trace/trace.jsonl   발화 하나에 한 줄: 길이·끝난 이유·프레임별 에너지/VAD
+#   logs/vad_trace/<시각>.wav     그때 녹음 (VAD_TRACE_KEEP 개까지)
+# VAD_TRACE=0 이면 끈다.
+VAD_TRACE = os.getenv("VAD_TRACE", "1") != "0"
+VAD_TRACE_DIR = os.getenv("VAD_TRACE_DIR", os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "logs", "vad_trace"))
+VAD_TRACE_KEEP = int(os.getenv("VAD_TRACE_KEEP", "300"))
+
+
+def _trace_bar(flags: list[int]) -> str:
+    """프레임 판정을 한 줄 그림으로. █ 말(유효) ▒ VAD 는 말인데 소리가 작음 · 침묵"""
+    return "".join("█" if f == 2 else "▒" if f == 1 else "·" for f in flags)
 
 
 def input_channels(pa: pyaudio.PyAudio, index: int | None) -> int:
@@ -391,10 +408,19 @@ class LiveRecorder:
 
         print("🎙️  마이크 대기 중... (말하면 녹음 시작)")
         self.chip.start()
+        # 말끝 기록용: 녹음 중 프레임마다 (에너지, 판정 0/1/2, 침묵 카운터)
+        tr_e: list[int] = []
+        tr_f: list[int] = []
+        tr_sil: list[int] = []
+        tr_src = ""
+        end_reason = "?"
+        t_listen = time.time()
+        t_start = t_end = None
 
         try:
             while True:
                 if stop_event is not None and stop_event.is_set():
+                    end_reason = "stopped"
                     print("⏹️  듣기 중단")
                     frames.clear()
                     break
@@ -440,6 +466,8 @@ class LiveRecorder:
                     if len(start_win) == start_win.maxlen and sum(start_win) > 5:
                         print("▶️  말 시작 감지")
                         recording_started = True
+                        t_start = time.time()
+                        tr_src = vad_src
                         if tap is not None and tap.tail and waited_frames <= overlap_frames:
                             frames.extend(tap.tail)
                             self.used_overlap = True
@@ -472,7 +500,13 @@ class LiveRecorder:
                             spoken_since_pause = 0
                             _safe_call(on_pause)
 
+                    tr_e.append(int(energy))
+                    tr_f.append(2 if valid_speech else 1 if is_speech else 0)
+                    tr_sil.append(silence_run)
+
                     if silence_run >= silence_end_frames:
+                        end_reason = "silence"
+                        t_end = time.time()
                         print("⏹️  말 종료 감지")
                         # 말끝 뒤 침묵은 STT_TAIL_MS 만 남긴다. 다 보내면 STT 가 0.2초쯤 더 걸린다.
                         drop = silence_run - self.STT_TAIL_MS // self.chunk_duration_ms
@@ -481,6 +515,8 @@ class LiveRecorder:
                         break
 
                     if total_recorded_frames >= max_frame_count:
+                        end_reason = "max_len"
+                        t_end = time.time()
                         print("⏹️  최대 녹음 길이 도달")
                         break
         finally:
@@ -505,7 +541,53 @@ class LiveRecorder:
             return None
 
         self._save_wav(output_path, frames)
+        if recording_started and VAD_TRACE:
+            self._trace(output_path, end_reason, tr_src, tr_e, tr_f, tr_sil,
+                        silence_end_frames, t_listen, t_start, t_end)
         return output_path
+
+    def _trace(self, wav_path, reason, src, energies, flags, sils, sil_end,
+               t_listen, t_start, t_end) -> None:
+        """말끝 판단 한 줄 요약을 찍고, 프레임 기록과 녹음을 logs/vad_trace 에 남긴다."""
+        try:
+            ms = self.chunk_duration_ms
+            n = len(flags)
+            # 마지막으로 '말'(유효) 이었던 프레임 → 거기서부터 끝까지가 말끝 침묵
+            last_speech = max((i for i, f in enumerate(flags) if f == 2), default=-1)
+            tail_ms = (n - 1 - last_speech) * ms
+            speech_ms = sum(1 for f in flags if f == 2) * ms
+            # 말 중간 쉼: 녹음 중 침묵 카운터가 가장 높게 올랐다가 리셋된 값(=잘릴 뻔한 정도)
+            peak_pause = 0
+            for a, b in zip(sils, sils[1:]):
+                if b < a:
+                    peak_pause = max(peak_pause, a)
+            print(f"📏 말끝[{reason}] 녹음 {n * ms / 1000:.1f}s (말 {speech_ms / 1000:.1f}s)"
+                  f"  끝 침묵 {tail_ms}ms/{sil_end * ms}ms"
+                  f"  중간 최장 쉼 {peak_pause * ms}ms  vad={src}")
+            print(f"   마지막 2초 {_trace_bar(flags[-(2000 // ms):])}")
+
+            os.makedirs(VAD_TRACE_DIR, exist_ok=True)
+            stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(t_start or t_listen))
+            wav_name = ""
+            if VAD_TRACE_KEEP > 0:
+                wav_name = f"{stamp}.wav"
+                shutil.copyfile(wav_path, os.path.join(VAD_TRACE_DIR, wav_name))
+                wavs = sorted(f for f in os.listdir(VAD_TRACE_DIR) if f.endswith(".wav"))
+                for old in wavs[:-VAD_TRACE_KEEP]:
+                    os.remove(os.path.join(VAD_TRACE_DIR, old))
+            rec = {
+                "time": stamp, "reason": reason, "vad": src, "frame_ms": ms,
+                "silence_end_ms": sil_end * ms, "wait_ms": int(((t_start or t_listen) - t_listen) * 1000),
+                "record_ms": n * ms, "speech_ms": speech_ms, "tail_ms": tail_ms,
+                "peak_pause_ms": peak_pause * ms,
+                "end_at": time.strftime("%H:%M:%S", time.localtime(t_end)) if t_end else None,
+                "energy_thr": self.CHIP_ENERGY_THRESHOLD if src == "chip" else self.min_energy_threshold,
+                "wav": wav_name, "energy": energies, "flag": flags, "silence": sils,
+            }
+            with open(os.path.join(VAD_TRACE_DIR, "trace.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception as e:   # 기록 실패로 대화가 멈추면 안 된다
+            print(f"⚠️  말끝 기록 실패: {e}")
 
     # 녹음 파일에 남길 말끝 뒤 침묵(ms)
     STT_TAIL_MS = 300
