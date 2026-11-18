@@ -151,6 +151,19 @@ reply_wake = threading.Event()
 # 워커가 읽지 않고 두었다가, 끝난 뒤에 모아 읽고 다시 여쭌다.
 reply_pending = threading.Event()
 
+# 소형 위험 판별 모델(risk_model/). 규칙과 LLM 사이의 두 번째 방어선이다.
+# LLM 이 본 위험은 모델도 이 확률 이상으로 볼 때만 '긴급' 으로 보낸다. 아니면 '지켜봄'.
+# 평가셋(553)에서 0.15 일 때 오탐이 31% → 15% 로 줄고 재현율은 96% → 86%.
+RISK_MODEL_AGREE_THR = float(os.getenv("RISK_MODEL_AGREE_THR", "0.15"))
+# LLM 이 실패했을 때 모델만으로 위험이라고 볼 확률. 그보다 높으면(URGENT) 긴급으로 보낸다.
+RISK_MODEL_FALLBACK_THR = float(os.getenv("RISK_MODEL_FALLBACK_THR", "0.5"))
+RISK_MODEL_FALLBACK_URGENT = float(os.getenv("RISK_MODEL_FALLBACK_URGENT", "0.8"))
+# LLM 이 답을 못 줄 때(네트워크·요금 등) 모리가 하는 말.
+LLM_DOWN_REPLY = "미안해요, 제가 지금 잠깐 생각이 잘 안 나요. 조금 있다가 다시 말씀해 주시겠어요?"
+# 지켜봄인 자해에 하는 말. 정해진 자해 답과 같되 "가족분들께 지금 말씀드릴게요" 를 뺐다
+# (지켜봄은 즉시 알리지 않으니 그 약속을 하면 안 된다).
+SELF_HARM_WATCH_REPLY = "그런 마음이 드셨군요. 많이 힘드셨겠어요. 저는 여기 곁에 있어요."
+
 # 사람이 없다가 들어오시면 켜진다. 웨이크워드 대기를 끊고 모리가 먼저 말을 건다.
 proactive_wake = threading.Event()
 # 이만큼 넘게 안 계셨다가 오셔야 말을 건다. 레이더가 잠깐 놓쳤다 다시 잡은 걸
@@ -448,6 +461,20 @@ def chat_with_memory(client, user_text: str, context: str,
         "- medical    : 약을 더/덜 먹어도 되는지, 병원에 안 가도 되는지 등의 판단 요청\n"
         "- abuse      : 누가 때리거나 밥을 안 주는 등 험한 일을 당했다는 이야기\n"
         "'힘들어 죽겠다', '맛이 죽여준다' 같은 관용적인 강조는 none 입니다.\n"
+        # 평가셋(eval_safety.py)에서 LLM 이 일상 문장의 31% 를 위험으로 본 곳들. 대조
+        # 예시는 평가셋 문장을 쓰지 않고 새로 썼다(평가가 새지 않게).
+        "risk 는 '어르신 본인의 지금 마음이나 지금 겪는 일' 일 때만 넣습니다. "
+        "아래는 낱말이 비슷해도 none 입니다.\n"
+        "- 남의 이야기: '친구 남편이 세상 떴대', '아들이 죽고 싶다길래 걱정이야', "
+        "'TV에서 사람 때리는 걸 봤어'\n"
+        "- 부정·지난 일: '난 아직 더 살고 싶어', '그땐 죽고 싶었는데 이젠 괜찮아'\n"
+        "- 죽음·노화에 대한 걱정이나 담담한 이야기: '나이 드니 죽는 게 무섭네', "
+        "'내가 죽으면 집은 딸 줄 거야', '친구들이 하나둘 떠나니 쓸쓸해'\n"
+        "- 형편이 힘들다는 푸념: '요즘 살기 팍팍해', '먹고살기 힘들다'\n"
+        "- 병·약 이야기일 뿐 판단을 묻지 않는 말: '수술 날짜 잡혔어', '약이 너무 써'\n"
+        "반대로 아래는 낱말이 없어도 위험입니다(self_harm): "
+        "'먼저 간 영감 곁으로 가고 싶어', '자식들 짐 안 되게 조용히 가야지', "
+        "'약을 한꺼번에 먹으면 편해질까'.\n"
         "\n[기억 사용] reply 에 [관련 기억] 의 내용을 실제로 꺼내 말할 거면 "
         "used_memory 를 true, 아니면 false 로 하세요.\n"
         "\n[음성 인식] 어르신의 말은 음성 인식으로 받아 적은 글이라 잘못 들린 말이 "
@@ -989,7 +1016,9 @@ ASK_AGAIN_REPLY = "제대로 듣지 못했어요. 다시 한번 말씀해 주시
 def _cached_phrases() -> set[str]:
     """TTS 결과를 캐시해 두는 정해진 문장. 시간대별 인사, 안전 판별의 정해진 답,
     다시 여쭙는 말. 부르자마자 하는 인사와 안전 답은 늦으면 안 되는 말이다."""
-    return _all_greetings() | set(safety.fixed_replies()) | {ASK_AGAIN, ASK_AGAIN_REPLY}
+    return (_all_greetings() | set(safety.fixed_replies()) | {ASK_AGAIN, ASK_AGAIN_REPLY}
+            # 네트워크가 끊겨 LLM 이 실패할 때 하는 말. 그땐 목소리 합성도 안 되니 미리 둔다.
+            | {LLM_DOWN_REPLY, SELF_HARM_WATCH_REPLY})
 
 
 def prewarm_tts() -> None:
@@ -1162,22 +1191,28 @@ def report_utterances(user_text: str, reply: str) -> None:
         print(f"⚠️  발화 기록 실패: {e}")
 
 
-def report_safety(kind: str, excerpt: str) -> None:
+def report_safety(kind: str, excerpt: str, urgent: bool = True,
+                  source: str = "rule") -> None:
     """대화에서 가려낸 위험 신호를 서버에 남긴다.
 
-    자해 신호는 서버가 받는 즉시 가족에게 알린다. 실패해도 대화는 그대로
-    이어간다 — 인형이 어르신 곁에서 할 말은 이미 했다.
+    urgent  True 면 서버가 받는 즉시 가족에게 알린다(자해). False 는 '지켜볼 신호' 라
+            즉시 알리지 않고 그날 리포트에만 남긴다 — LLM 혼자 본 신호는 오탐이 많아서
+            (평가셋 일상 문장의 31%) 잘못된 긴급 알림을 막으려는 것이다.
+    source  rule | llm | llm+model | model  — 누가 잡았는지(나중에 따져 보려고)
+    실패해도 대화는 그대로 이어간다 — 인형이 어르신 곁에서 할 말은 이미 했다.
     """
     try:
         r = requests.post(
             f"{REMORY_API}/devices/{DEVICE_ID}/safety-events",
-            json={"kind": kind, "excerpt": excerpt[:500]},
+            json={"kind": kind, "excerpt": excerpt[:500],
+                  "urgent": urgent, "source": source},
             headers={"X-Device-Token": DEVICE_TOKEN},
             timeout=30,
         )
         # 서버가 거절해도 예외가 안 나서, 가족에게 갔는지 로그로는 알 수 없었다.
         if r.ok:
-            print(f"🛡️  안전 신호 보냄: {kind} {excerpt[:40]!r}")
+            print(f"🛡️  안전 신호 보냄: {kind} {'긴급' if urgent else '지켜봄'}"
+                  f"({source}) {excerpt[:40]!r}")
         else:
             print(f"⚠️  안전 신호 기록 거절({r.status_code}): {r.text[:200]}")
     except Exception as e:
@@ -2203,6 +2238,27 @@ def main() -> None:
     else:
         llm_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     print(f"🧠 LLM: {CLAUDE_MODEL if LLM_ENGINE == 'claude' else GROQ_MODEL}")
+    risk_clf = None
+    try:
+        from risk_model.runtime import RiskClassifier
+        risk_clf = RiskClassifier()
+        print("🛡️  소형 위험 판별 모델 활성화")
+    except Exception as e:
+        print(f"⚠️  소형 위험 판별 모델 없음 — 규칙과 LLM 만 씀: {e}")
+
+    def risk_guess(text: str):
+        """소형 모델의 판단. 바로 앞에 하신 말을 같이 넣는다. 실패하면 None."""
+        if not risk_clf or not text:
+            return None
+        prev = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
+        try:
+            g = risk_clf.classify(text, prev=prev)
+        except Exception as e:
+            print(f"⚠️  위험 모델 오류: {e}")
+            return None
+        if g.risk_prob >= RISK_MODEL_AGREE_THR:
+            print(f"🧪 위험 모델: {g.top_risk} {g.risk_prob:.2f} (강도 {g.level}, {g.frame})")
+        return g
     if PRINT_LLM_PROMPT:
         # 임시 기록이라 켤 때마다 비운다. 끝없이 쌓이지 않게.
         os.makedirs(os.path.dirname(LLM_PROMPT_LOG), exist_ok=True)
@@ -2524,6 +2580,9 @@ def main() -> None:
                 threading.Thread(
                     target=report_safety, args=(risk.kind, user_text), daemon=True
                 ).start()
+            # 소형 모델(7ms 쯤)은 여기서 한 번 본다. LLM 판단을 확인하거나, LLM 이
+            # 실패했을 때 대신 쓴다.
+            guess = risk_guess(user_text)
 
             emotion = emotion_holder["result"]
             if emotion:
@@ -2582,16 +2641,36 @@ def main() -> None:
             else:
                 # 말할 연결을 LLM 에 묻는 동안 미리 연다(0.4초쯤 걸린다).
                 live_tts = open_live_tts()
+                watch_only = False     # 지켜봄(즉시 알리지 않는) 신호인지
                 # 받는 대로 말하면 이 시간은 reply 앞의 칸(위험 신호·표정)이 올 때까지다.
                 with timed("LLM", timings):
-                    llm_out = chat_with_memory(
-                        llm_client, user_text, context, emotion,
-                        hint=(risk.hint if risk else None),
-                        mark=mark,
-                        history=history[-HISTORY_TURNS * 2:],
-                        past=past_block,
-                        stream=live_tts is not None,
-                    )
+                    try:
+                        llm_out = chat_with_memory(
+                            llm_client, user_text, context, emotion,
+                            hint=(risk.hint if risk else None),
+                            mark=mark,
+                            history=history[-HISTORY_TURNS * 2:],
+                            past=past_block,
+                            stream=live_tts is not None,
+                        )
+                    except Exception as e:
+                        # 예전엔 여기서 턴이 통째로 끊겨 아무 말도 못 했고, 안전은 규칙만
+                        # 남았다. 이제 소형 모델이 대신 보고 짧게라도 답한다.
+                        print(f"⚠️  LLM 실패 — 규칙·소형 모델로만 판단: {e}")
+                        llm_out = None
+                if llm_out is None:
+                    if (not risk and guess
+                            and guess.risk_prob >= RISK_MODEL_FALLBACK_THR):
+                        risk = safety.from_llm(guess.top_risk)
+                        urgent = guess.risk_prob >= RISK_MODEL_FALLBACK_URGENT
+                        watch_only = not urgent
+                        print(f"🛡️  안전 신호(모델, LLM 없음): {risk.kind}")
+                        threading.Thread(
+                            target=report_safety,
+                            args=(risk.kind, user_text, urgent, "model"), daemon=True,
+                        ).start()
+                    llm_out = {"reply": LLM_DOWN_REPLY, "expression": "평온", "risk": None,
+                               "heard": "", "used_memory": False}
                 reply, robot_expr = llm_out["reply"], llm_out["expression"]
                 reply_stream = llm_out.get("reply_stream")
                 used_memory = llm_out["used_memory"]
@@ -2611,19 +2690,32 @@ def main() -> None:
                 # 규칙이 놓쳤거나 약하게 본 것을 LLM 이 더 급하게 봤으면 올린다.
                 upgraded = safety.escalate(risk, llm_out.get("risk"), heard_text)
                 if upgraded:
+                    # 두 단계 알림. LLM 혼자 본 위험은 오탐이 많다. 소형 모델도 위험으로
+                    # 보면 긴급(가족에게 즉시), 아니면 지켜봄(그날 리포트에만).
+                    g = guess if heard_text == user_text else risk_guess(heard_text)
+                    agreed = g is None or g.risk_prob >= RISK_MODEL_AGREE_THR
+                    watch_only = not agreed
                     print(f"🛡️  안전 신호(LLM): {upgraded.kind}"
-                          + (f" ← {risk.kind}" if risk else ""))
+                          + (f" ← {risk.kind}" if risk else "")
+                          + (" — 모델도 위험으로 봄 → 긴급" if agreed and g
+                             else " — 모델은 아니라고 봄 → 지켜봄" if not agreed else ""))
                     threading.Thread(
                         target=report_safety,
                         # 가족 앱에 뜨는 문장이다. 잘못 들린 그대로가 아니라 바로잡은 말을 보낸다.
-                        args=(upgraded.kind, heard_text),
+                        args=(upgraded.kind, heard_text, agreed,
+                              "llm+model" if g else "llm"),
                         daemon=True,
                     ).start()
                     risk = upgraded
 
                 # 정해진 말이 있는 종류(자해·타해·의료)는 모델이 쓴 답 대신 그걸 쓴다.
                 # 받는 대로 말하던 답은 버린다 — 아직 한 마디도 말하지 않았다.
-                if risk and risk.reply:
+                # 지켜봄인 자해는 정해진 말을 쓰지 않는다. "가족분들께 지금 말씀드릴게요"
+                # 라고 해 놓고 알리지 않게 되기 때문이다. LLM 이 쓴 공감하는 답을 그대로 둔다.
+                if watch_only and risk and risk.kind == safety.SELF_HARM:
+                    if reply == LLM_DOWN_REPLY:
+                        reply, robot_expr = SELF_HARM_WATCH_REPLY, "위로"
+                elif risk and risk.reply:
                     reply, robot_expr = risk.reply, risk.expression
                     reply_stream = None
             if reply_stream is None and live_tts is not None:
