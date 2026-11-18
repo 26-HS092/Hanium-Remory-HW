@@ -2296,6 +2296,15 @@ def main() -> None:
         conversation_active = False
         conv_session_id = None       # 세션 종료
         report_conversation(False)   # 대화중 종료
+        # 한 마디도 못 나눈 헛걸음은 웨이크워드 오인식이었을 수 있다. 남겨 둔 그 소리에
+        # 표시해 두면 나중에 웨이크워드를 다시 학습할 때 '모리야 아님' 후보로 쓴다.
+        sample = getattr(wakeword_detector, "last_sample", None)
+        if sample and not turns_this_session and sample.exists():
+            try:
+                sample.rename(sample.with_name(sample.stem + "_empty.wav"))
+            except OSError:
+                pass
+        wakeword_detector.last_sample = None
         # 한 마디도 못 나눈 헛걸음은 일과에 남기지 않는다.
         if turns_this_session:
             report_activity(

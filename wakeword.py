@@ -30,6 +30,36 @@ DETECTION_COOLDOWN_SEC = 2.0
 # 켜면 1초마다 그동안의 최고 점수와 마이크 음량(RMS)을 찍는다. 안 깨어날 때 원인 찾기용.
 WAKE_DEBUG = bool(os.getenv("WAKE_DEBUG"))
 
+# 웨이크워드 모델을 다시 학습할 때 쓸 소리를 남긴다(git 에 안 올라가는 audio/ 아래).
+#   rejected/  문턱을 넘었지만 주변 상황 때문에 무시한 소리 — 대부분 TV·옆 사람 말(오인식)
+#   accepted/  모리야로 받아들인 소리. 대화가 한 마디도 없이 끝나면 main.py 가
+#              이름 끝에 _empty 를 붙인다(오인식이었을 가능성이 크다).
+# 파일 이름: 시각_점수_이유.wav. 소리 창 하나(TARGET_SECONDS)라 한 개에 수십 KB 다.
+WAKE_SAMPLE_DIR = Path(os.getenv("WAKE_SAMPLE_DIR",
+                                 Path(__file__).parent / "audio" / "wake_samples"))
+WAKE_SAMPLE_MAX = 3000          # 폴더마다 이만큼 넘으면 오래된 것부터 지운다
+
+
+def save_wake_sample(kind: str, audio: np.ndarray, score: float, why: str = "") -> Path | None:
+    import wave
+    try:
+        d = WAKE_SAMPLE_DIR / kind
+        d.mkdir(parents=True, exist_ok=True)
+        tag = why.replace(" ", "").replace(":", "-") if why else "ok"
+        path = d / f"{time.strftime('%Y%m%d-%H%M%S')}_{score:.3f}_{tag}.wav"
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SAMPLE_RATE)
+            w.writeframes(audio.astype(np.int16).tobytes())
+        files = sorted(d.glob("*.wav"))
+        for old in files[:-WAKE_SAMPLE_MAX]:
+            old.unlink(missing_ok=True)
+        return path
+    except Exception as e:
+        print(f"⚠️  웨이크워드 소리 저장 실패: {e}")
+        return None
+
 
 def load_audio_features_class():
     try:
@@ -225,6 +255,7 @@ class MoriyaWakeWordDetector:
         메시지 답장 녹음 등)이 마이크를 써야 할 때 기다림을 끊는 데 씁니다.
         """
 
+        self.last_sample = None       # 이번에 받아들인 소리 파일(save_wake_sample)
         audio_queue = queue.Queue()
         audio_buffer = deque(maxlen=BUFFER_SAMPLES)
 
@@ -298,10 +329,12 @@ class MoriyaWakeWordDetector:
                         if now - last_detection_time >= DETECTION_COOLDOWN_SEC:
                             print(f"🙉 모리야 비슷한 소리 무시: score={score:.3f} < {need:.2f} ({why})",
                                   flush=True)
+                            save_wake_sample("rejected", audio_np, score, why)
                             last_detection_time = now
                         continue
                     if now - last_detection_time >= DETECTION_COOLDOWN_SEC:
                         print(f"\n✅ 모리야 감지됨! score={score:.3f}\n")
+                        self.last_sample = save_wake_sample("accepted", audio_np, score)
                         last_detection_time = now
                         return True
 
