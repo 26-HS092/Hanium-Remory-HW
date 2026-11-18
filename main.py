@@ -256,6 +256,12 @@ except Exception as _e:                          # pragma: no cover
 
 # 웨이크워드가 들렸을 때 카메라가 이 시간 안에 사람을 못 잡았으면 빠르게 찾게 한다.
 WAKE_NEEDS_TARGET_SEC = 3.0
+# 웨이크워드 오인식 막기. 점수만으론 진짜 부름(0.70~0.97)과 TV·옆 사람 말(0.73~0.91)이
+# 안 갈렸는데, 오인식은 거의 다 카메라에 아무도 없거나 레이더가 '없음' 일 때였다.
+# 그때만 문턱을 올린다. 누워 계셔서 카메라가 못 보는 때는 한 번 더 부르시면 된다.
+WAKE_THR_UNSEEN = float(os.getenv("WAKE_THR_UNSEEN", "0.85"))   # 카메라에 최근 사람 없음
+WAKE_THR_AWAY = float(os.getenv("WAKE_THR_AWAY", "0.95"))       # 레이더도 '없음'
+WAKE_SEEN_WITHIN_SEC = 10.0
 
 
 # RAG retriever.py 안에서 "./chroma_db" 상대경로를 쓰므로 CWD를 RAG 폴더로 이동
@@ -2330,8 +2336,18 @@ def main() -> None:
                 # 답장 요청이 오면 웨이크워드 대기를 끊고 위로 돌아간다.
                 # 방에 들어오시면(proactive_wake) 부르시기 전에 모리가 먼저 말을 건다.
                 proactive = False
+                def wake_threshold():
+                    if presence and not presence.present:
+                        return WAKE_THR_AWAY, "레이더: 사람 없음"
+                    if hasattr(tracker, "has_target") and not tracker.has_target(
+                        WAKE_SEEN_WITHIN_SEC
+                    ):
+                        return WAKE_THR_UNSEEN, "카메라: 사람 안 보임"
+                    return WAKEWORD_THRESHOLD, ""
+
                 if not wakeword_detector.wait_for_wakeword(
-                    stop_event=_AnyEvent(reply_wake, proactive_wake)
+                    stop_event=_AnyEvent(reply_wake, proactive_wake),
+                    threshold_fn=wake_threshold,
                 ):
                     if not _take_proactive():
                         continue

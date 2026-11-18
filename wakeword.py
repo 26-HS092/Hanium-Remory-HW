@@ -216,7 +216,7 @@ class MoriyaWakeWordDetector:
 
         return float(score)
 
-    def wait_for_wakeword(self, stop_event=None) -> bool:
+    def wait_for_wakeword(self, stop_event=None, threshold_fn=None) -> bool:
         """
         "모리야"가 감지될 때까지 마이크를 듣습니다.
         감지되면 True를 반환합니다.
@@ -291,6 +291,15 @@ class MoriyaWakeWordDetector:
                         debug_t, debug_max = now, 0.0
 
                 if score >= self.threshold:
+                    # 주변 상황에 따라 문턱을 올린다(threshold_fn). 아무도 안 보이는데
+                    # 넘은 점수는 TV·옆 사람 말소리인 때가 많았다.
+                    need, why = threshold_fn() if threshold_fn else (self.threshold, "")
+                    if score < need:
+                        if now - last_detection_time >= DETECTION_COOLDOWN_SEC:
+                            print(f"🙉 모리야 비슷한 소리 무시: score={score:.3f} < {need:.2f} ({why})",
+                                  flush=True)
+                            last_detection_time = now
+                        continue
                     if now - last_detection_time >= DETECTION_COOLDOWN_SEC:
                         print(f"\n✅ 모리야 감지됨! score={score:.3f}\n")
                         last_detection_time = now
