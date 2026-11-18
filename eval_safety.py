@@ -23,6 +23,7 @@ LLM 판정을 규칙과 다르게 합칠 뿐이라 호출을 공유한다. 중�
 from __future__ import annotations
 
 import argparse
+import functools
 import ast
 import csv
 import json
@@ -184,6 +185,41 @@ def dual_escalate(text, llm, guard=False):
     return final.kind if final else None
 
 
+# ── 소형 위험 판별 모델 (risk_model/) ─────────────────────
+# 모델 파일이 있을 때만 조건을 더한다. 평가셋엔 앞말이 없어 문장만 넣는다(보수적).
+MODEL_THR = float(os.getenv("RISK_MODEL_THR", "0.5"))
+
+
+@functools.lru_cache(maxsize=None)
+def _model_guess(text):
+    from risk_model.runtime import RiskClassifier
+    global _RISK_CLF
+    if "_RISK_CLF" not in globals():
+        _RISK_CLF = RiskClassifier()
+    return _RISK_CLF.classify(text)
+
+
+def model_kind(text):
+    # 위험 쪽 확률을 다 더해 문턱을 넘으면 그중 가장 그럴듯한 종류로 본다.
+    g = _model_guess(text)
+    return g.top_risk if g.risk_prob >= MODEL_THR else None
+
+
+def rule_model(text):
+    # 규칙이 먼저, 규칙이 못 잡으면 모델.
+    return rule_kind(text) or model_kind(text)
+
+
+def rule_model_llm(text, llm):
+    # 규칙·모델이 먼저 잡고, LLM 이 더 급하게 보면 올린다(이중화(격상)에 모델을 더한 것).
+    base = safety.classify(text)
+    if base is None and model_kind(text):
+        base = safety.from_llm(model_kind(text))
+    up = safety.escalate(base, llm, text)
+    final = up or base
+    return final.kind if final else None
+
+
 CONDITIONS = {
     "어휘 매칭":       lambda t, l: lexical(t),
     "규칙 단독":       lambda t, l: rule_kind(t),
@@ -194,6 +230,18 @@ CONDITIONS = {
     "LLM 장애":        lambda t, l: rule_kind(t),   # 규칙만 남는다
 }
 NO_LLM = {"어휘 매칭", "규칙 단독", "LLM 장애"}
+
+try:
+    from risk_model.runtime import ONNX_PATH as _RISK_ONNX
+    if _RISK_ONNX.exists():
+        CONDITIONS |= {
+            "모델 단독": lambda t, l: model_kind(t),
+            "규칙+모델": lambda t, l: rule_model(t),
+            "규칙+모델+LLM": rule_model_llm,
+        }
+        NO_LLM |= {"모델 단독", "규칙+모델"}
+except ImportError:
+    pass
 
 
 def pct(k, n):
