@@ -23,6 +23,7 @@ LLM 판정을 규칙과 다르게 합칠 뿐이라 호출을 공유한다. 중�
 from __future__ import annotations
 
 import argparse
+import functools
 import ast
 import csv
 import json
@@ -75,6 +76,8 @@ _KEEP_NAMES = {
 _KEEP_FUNCS = {
     "chat_with_memory", "_ask_groq", "_ask_claude", "_failed_generation",
     "_tidy_reply", "_first_sentences", "format_now", "_korean_time",
+    "_claude_request", "_print_claude_usage", "_print_prompt", "_llm_fields",
+    "_ReplyStream",
 }
 
 
@@ -93,13 +96,15 @@ def load_chat():
             isinstance(t, ast.Name) and t.id in _KEEP_NAMES for t in n.targets
         ):
             nodes.append(n)
-        elif isinstance(n, ast.FunctionDef) and n.name in _KEEP_FUNCS:
+        elif isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in _KEEP_FUNCS:
             nodes.append(n)
     ns = {
         "os": os, "re": re, "json": json, "datetime": datetime, "safety": safety,
         "Groq": Groq, "BadRequestError": BadRequestError,
         "strip_marks": strip_marks, "datamark_instruction": datamark_instruction,
         "PRINT_LLM_PROMPT": False,
+        # 앱에 등록된 어르신 정보. 평가는 문장만 보고 판단하는지 재므로 비운다.
+        "_patient_profile": lambda: "",
     }
     exec(compile(ast.Module(nodes, []), "main.py", "exec"), ns)
     engine = ns["LLM_ENGINE"]
@@ -180,6 +185,41 @@ def dual_escalate(text, llm, guard=False):
     return final.kind if final else None
 
 
+# ── 소형 위험 판별 모델 (risk_model/) ─────────────────────
+# 모델 파일이 있을 때만 조건을 더한다. 평가셋엔 앞말이 없어 문장만 넣는다(보수적).
+MODEL_THR = float(os.getenv("RISK_MODEL_THR", "0.5"))
+
+
+@functools.lru_cache(maxsize=None)
+def _model_guess(text):
+    from risk_model.runtime import RiskClassifier
+    global _RISK_CLF
+    if "_RISK_CLF" not in globals():
+        _RISK_CLF = RiskClassifier()
+    return _RISK_CLF.classify(text)
+
+
+def model_kind(text):
+    # 위험 쪽 확률을 다 더해 문턱을 넘으면 그중 가장 그럴듯한 종류로 본다.
+    g = _model_guess(text)
+    return g.top_risk if g.risk_prob >= MODEL_THR else None
+
+
+def rule_model(text):
+    # 규칙이 먼저, 규칙이 못 잡으면 모델.
+    return rule_kind(text) or model_kind(text)
+
+
+def rule_model_llm(text, llm):
+    # 규칙·모델이 먼저 잡고, LLM 이 더 급하게 보면 올린다(이중화(격상)에 모델을 더한 것).
+    base = safety.classify(text)
+    if base is None and model_kind(text):
+        base = safety.from_llm(model_kind(text))
+    up = safety.escalate(base, llm, text)
+    final = up or base
+    return final.kind if final else None
+
+
 CONDITIONS = {
     "어휘 매칭":       lambda t, l: lexical(t),
     "규칙 단독":       lambda t, l: rule_kind(t),
@@ -190,6 +230,18 @@ CONDITIONS = {
     "LLM 장애":        lambda t, l: rule_kind(t),   # 규칙만 남는다
 }
 NO_LLM = {"어휘 매칭", "규칙 단독", "LLM 장애"}
+
+try:
+    from risk_model.runtime import ONNX_PATH as _RISK_ONNX
+    if _RISK_ONNX.exists():
+        CONDITIONS |= {
+            "모델 단독": lambda t, l: model_kind(t),
+            "규칙+모델": lambda t, l: rule_model(t),
+            "규칙+모델+LLM": rule_model_llm,
+        }
+        NO_LLM |= {"모델 단독", "규칙+모델"}
+except ImportError:
+    pass
 
 
 def pct(k, n):
@@ -223,6 +275,11 @@ def main():
         "위험 발화 재현율(종류 일치)": lambda r: r["label"] != "none",
         "관용구 오탐율": lambda r: r["type"] == "idiom",
         "일상 발화 오탐율": lambda r: r["type"] == "normal",
+        # build_risk_eval.py 로 만든 평가셋에만 있는 칸. 위험한 낱말이 있지만 남 이야기·
+        # 지난 일·부정·가정이라 대응할 필요가 없는 말을 위험으로 잡은 비율.
+        "맥락(남·과거·부정·가정) 오탐율": lambda r: r["label"] == "none"
+            and r.get("frame") in ("other", "past", "negated", "hypothetical")
+            and int(r.get("level") or 0) == 0,
     }
 
     table = {}

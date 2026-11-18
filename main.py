@@ -256,6 +256,12 @@ except Exception as _e:                          # pragma: no cover
 
 # 웨이크워드가 들렸을 때 카메라가 이 시간 안에 사람을 못 잡았으면 빠르게 찾게 한다.
 WAKE_NEEDS_TARGET_SEC = 3.0
+# 웨이크워드 오인식 막기. 점수만으론 진짜 부름(0.70~0.97)과 TV·옆 사람 말(0.73~0.91)이
+# 안 갈렸는데, 오인식은 거의 다 카메라에 아무도 없거나 레이더가 '없음' 일 때였다.
+# 그때만 문턱을 올린다. 누워 계셔서 카메라가 못 보는 때는 한 번 더 부르시면 된다.
+WAKE_THR_UNSEEN = float(os.getenv("WAKE_THR_UNSEEN", "0.85"))   # 카메라에 최근 사람 없음
+WAKE_THR_AWAY = float(os.getenv("WAKE_THR_AWAY", "0.95"))       # 레이더도 '없음'
+WAKE_SEEN_WITHIN_SEC = 10.0
 
 
 # RAG retriever.py 안에서 "./chroma_db" 상대경로를 쓰므로 CWD를 RAG 폴더로 이동
@@ -1163,12 +1169,17 @@ def report_safety(kind: str, excerpt: str) -> None:
     이어간다 — 인형이 어르신 곁에서 할 말은 이미 했다.
     """
     try:
-        requests.post(
+        r = requests.post(
             f"{REMORY_API}/devices/{DEVICE_ID}/safety-events",
             json={"kind": kind, "excerpt": excerpt[:500]},
             headers={"X-Device-Token": DEVICE_TOKEN},
             timeout=30,
         )
+        # 서버가 거절해도 예외가 안 나서, 가족에게 갔는지 로그로는 알 수 없었다.
+        if r.ok:
+            print(f"🛡️  안전 신호 보냄: {kind} {excerpt[:40]!r}")
+        else:
+            print(f"⚠️  안전 신호 기록 거절({r.status_code}): {r.text[:200]}")
     except Exception as e:
         print(f"⚠️  안전 신호 기록 실패: {e}")
 
@@ -2285,6 +2296,15 @@ def main() -> None:
         conversation_active = False
         conv_session_id = None       # 세션 종료
         report_conversation(False)   # 대화중 종료
+        # 한 마디도 못 나눈 헛걸음은 웨이크워드 오인식이었을 수 있다. 남겨 둔 그 소리에
+        # 표시해 두면 나중에 웨이크워드를 다시 학습할 때 '모리야 아님' 후보로 쓴다.
+        sample = getattr(wakeword_detector, "last_sample", None)
+        if sample and not turns_this_session and sample.exists():
+            try:
+                sample.rename(sample.with_name(sample.stem + "_empty.wav"))
+            except OSError:
+                pass
+        wakeword_detector.last_sample = None
         # 한 마디도 못 나눈 헛걸음은 일과에 남기지 않는다.
         if turns_this_session:
             report_activity(
@@ -2325,8 +2345,18 @@ def main() -> None:
                 # 답장 요청이 오면 웨이크워드 대기를 끊고 위로 돌아간다.
                 # 방에 들어오시면(proactive_wake) 부르시기 전에 모리가 먼저 말을 건다.
                 proactive = False
+                def wake_threshold():
+                    if presence and not presence.present:
+                        return WAKE_THR_AWAY, "레이더: 사람 없음"
+                    if hasattr(tracker, "has_target") and not tracker.has_target(
+                        WAKE_SEEN_WITHIN_SEC
+                    ):
+                        return WAKE_THR_UNSEEN, "카메라: 사람 안 보임"
+                    return WAKEWORD_THRESHOLD, ""
+
                 if not wakeword_detector.wait_for_wakeword(
-                    stop_event=_AnyEvent(reply_wake, proactive_wake)
+                    stop_event=_AnyEvent(reply_wake, proactive_wake),
+                    threshold_fn=wake_threshold,
                 ):
                     if not _take_proactive():
                         continue
@@ -2585,7 +2615,8 @@ def main() -> None:
                           + (f" ← {risk.kind}" if risk else ""))
                     threading.Thread(
                         target=report_safety,
-                        args=(upgraded.kind, user_text),
+                        # 가족 앱에 뜨는 문장이다. 잘못 들린 그대로가 아니라 바로잡은 말을 보낸다.
+                        args=(upgraded.kind, heard_text),
                         daemon=True,
                     ).start()
                     risk = upgraded
