@@ -230,6 +230,7 @@ main.py              🎯 통합 파이프라인 + 백그라운드 워커 6종
 main_fish.py         예전 실행 파일 (이제 main.py 와 같음)
 wakeword.py          "모리야" 감지 (openWakeWord 임베딩 → ONNX)
 wake_test.py         웨이크워드만 따로 재기 (N번 불러 인식률 · TV 틀어 두고 오인식)
+bench_streaming.py   스트리밍 켬/끔 응답 시간 비교 (같은 질문 30개 → 첫 목소리까지)
 mic_vad.py           라이브 VAD 녹음 (발화 시작/끝 콜백 제공)
 mmwave.py            mmWave 레이더로 곁에 사람이 있는지 확인
 audio_out.py         스피커 재생 + Fish Audio / CosyVoice2 스트리밍 TTS
