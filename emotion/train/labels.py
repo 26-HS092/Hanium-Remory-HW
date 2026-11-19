@@ -4,6 +4,7 @@
 """
 import os
 import sys
+import unicodedata
 
 # emotion/face_crop.py 를 학습 스크립트에서도 그대로 쓰기 위해.
 EMOTION_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -42,3 +43,26 @@ def folder_to_target(name):
     if name in TARGET_LABELS:
         return name
     return AIHUB_TO_TARGET.get(name)
+
+
+# 아래 둘은 학습(train.py)과 평가(evaluate.py)가 같이 쓴다. 여기 두는 건 evaluate.py 가
+# torch 없이(파이에서도) 돌게 하려고 — train.py 는 import 만 해도 torch 가 필요하다.
+def list_samples(split_dir):
+    """crop 폴더 → [(경로, 5감정 인덱스)]"""
+    samples = []
+    for name in sorted(os.listdir(split_dir)):
+        target = folder_to_target(unicodedata.normalize("NFC", name))
+        d = os.path.join(split_dir, name)
+        if target is None or not os.path.isdir(d):
+            continue
+        idx = TARGET_LABELS.index(target)
+        samples += [(os.path.join(d, f), idx) for f in sorted(os.listdir(d))
+                    if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+    return samples
+
+
+def print_confusion(cm):
+    w = max(max(len(l) for l in TARGET_LABELS), len(str(cm.max()))) + 2
+    print("  정답\\예측".ljust(w + 2) + "".join(l.rjust(w) for l in TARGET_LABELS))
+    for l, row in zip(TARGET_LABELS, cm):
+        print(f"  {l}".ljust(w + 2) + "".join(str(v).rjust(w) for v in row))

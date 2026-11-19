@@ -69,7 +69,7 @@ AI Hub 는 대부분 젊은~중년 배우의 연기 표정이라 어르신 표�
 ```bash
 python emotion/capture_faces.py --who 수아                 # 조건 '기본'
 python emotion/capture_faces.py --who 수아 --cond 어두움 --delay 3
-.venv/bin/python evaluate.py --data ~/인형사진/기본 --detect
+python evaluate.py --data ~/인형사진/기본 --detect   # 파이에서도 됨(torch 불필요, scikit-learn·tqdm 필요)
 ```
 
 ## 4. 인형에 넣기

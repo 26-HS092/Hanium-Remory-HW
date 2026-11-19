@@ -19,9 +19,16 @@ import onnxruntime as ort
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from tqdm import tqdm
 
-from labels import HSEMOTION_LABELS, HSEMOTION_TO_TARGET, MODELS_DIR, TARGET_LABELS
-from train import list_samples, print_confusion
+from labels import (HSEMOTION_LABELS, HSEMOTION_TO_TARGET, MODELS_DIR, TARGET_LABELS,
+                    list_samples, print_confusion)
 import face_crop
+
+
+def hsemotion_path():
+    """HSEmotion ONNX. models/ 에 없으면 인형이 처음 켤 때 받아 두는 ~/.hsemotion/ 을 쓴다."""
+    p = os.path.join(MODELS_DIR, "enet_b0_8_best_afew.onnx")
+    home = os.path.expanduser("~/.hsemotion/enet_b0_8_best_afew.onnx")
+    return p if os.path.exists(p) or not os.path.exists(home) else home
 
 
 class OnnxModel:
@@ -71,7 +78,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="data/crops/test")
     ap.add_argument("--models", nargs="*", default=[
-        os.path.join(MODELS_DIR, "enet_b0_8_best_afew.onnx"),
+        hsemotion_path(),
         os.path.join(MODELS_DIR, "emotion_ko5.onnx"),
     ])
     ap.add_argument("--detect", action="store_true", help="원본 사진이면 YuNet 으로 잘라서 평가")

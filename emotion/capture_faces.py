@@ -29,7 +29,8 @@ capture_faces.py
    - 사람은 여럿(3~5명)일수록 좋다. 다음 사람은 --who 만 바꿔 다시 켠다.
 
 5. 점수 보기 — 옛 모델(HSEmotion)과 새 모델(ko5)이 나란히 나온다
-       cd emotion/train && .venv/bin/python evaluate.py --data ~/인형사진/기본 --detect
+       cd emotion/train && python evaluate.py --data ~/인형사진/기본 --detect
+   파이에서도 돈다(torch 불필요). 처음 한 번: pip install scikit-learn tqdm
 
 저장 위치: ~/인형사진/기본/<감정>/<이름>_<번호>.jpg
   (--cond 로 '기본' 대신 다른 폴더에, --out 으로 다른 곳에 저장할 수 있다)
@@ -210,7 +211,7 @@ def main():
 
     print("\n━━ 지금까지 ━━")
     summary(total, mine, a.who)
-    print(f"평가: cd emotion/train && .venv/bin/python evaluate.py --data {cond_dir} --detect")
+    print(f"평가: cd emotion/train && python evaluate.py --data {cond_dir} --detect")
 
 
 if __name__ == "__main__":
