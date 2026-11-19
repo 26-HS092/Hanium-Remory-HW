@@ -48,8 +48,6 @@ OUT_DIR = ROOT / "logs" / "wake_test"
 THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95]
 # 문턱을 넘은 뒤 이만큼 더 들어서 그 '모리야'의 가장 높은 점수를 마저 본다.
 PEAK_EXTRA_SEC = 0.75
-# 한 번 부르고 다음 안내까지 쉬는 시간. 앞 소리가 다음 차례에 섞이지 않게.
-GAP_SEC = 0.8
 
 
 class Mic:
@@ -96,15 +94,27 @@ class Scorer:
         self.reset()
 
     def reset(self):
-        # 조용한 소리로 채워 두어 바로 점수를 낼 수 있게 한다(2.1초를 기다리지 않게).
-        self.buf = deque([0] * BUFFER_SAMPLES, maxlen=BUFFER_SAMPLES)
+        # 창을 0(완전한 무음)으로 채워 두면 안 된다. 실제 마이크엔 늘 방 소리가 깔려 있어서,
+        # 0 이 섞인 창은 모델이 처음 보는 소리가 되고 점수가 낮게 나왔다. 그래서 비워 두고
+        # 실제 소리로 2.1초가 다 찰 때까지는 점수를 내지 않는다(main.py 와 같다).
+        self.buf = deque(maxlen=BUFFER_SAMPLES)
         self.since = 0
         self.audio = None
+
+    def fill(self, mic: "Mic"):
+        """지금 방 소리로 창을 새로 채운다(2.1초). 앞 차례의 '모리야' 가 남지 않게."""
+        self.reset()
+        mic.drain()
+        while len(self.buf) < BUFFER_SAMPLES:
+            chunk = mic.read(timeout=0.5)
+            if chunk is not None:
+                self.buf.extend(chunk.tolist())
+        self.since = 0
 
     def feed(self, chunk: np.ndarray) -> float | None:
         self.buf.extend(chunk.tolist())
         self.since += len(chunk)
-        if self.since < self.hop:
+        if self.since < self.hop or len(self.buf) < BUFFER_SAMPLES:
             return None
         self.since = 0
         self.audio = np.array(self.buf, dtype=np.int16)
@@ -136,8 +146,7 @@ def thresholds_with(thr: float) -> list[float]:
 # ── 1) 인식률 ──────────────────────────────────────────────────────────────────
 
 def one_call(mic: Mic, scorer: Scorer, window: float, thr: float):
-    """한 번 부르는 동안 들은 가장 높은 점수와 그때의 소리."""
-    scorer.reset()
+    """한 번 부르는 동안 들은 가장 높은 점수와 그때의 소리. 창은 미리 채워 둔다(fill)."""
     peak, peak_audio = 0.0, None
     heard = 0                       # 이번 차례에 받은 샘플 수
     stop_at = int(window * SAMPLE_RATE)
@@ -162,15 +171,14 @@ def one_call(mic: Mic, scorer: Scorer, window: float, thr: float):
 
 def run_calls(mic: Mic, scorer: Scorer, n: int, window: float, thr: float, stamp: str):
     print(f"\n화면에 '🗣  모리야!' 가 뜨면 한 번 불러 주세요. {n}번, 한 번에 {window:.0f}초씩 기다려요.")
-    print(f"감지 기준은 {thr:.2f} 이에요. 도중에 멈추려면 Ctrl+C.")
+    print(f"감지 기준은 {thr:.2f} 이에요. 차례 사이 2초쯤은 조용히 기다려 주세요. 멈추려면 Ctrl+C.")
     input("준비되면 Enter ▶ ")
 
     miss_dir = OUT_DIR / f"calls_{stamp}_miss"
     rows = []
     try:
         for i in range(1, n + 1):
-            time.sleep(GAP_SEC)
-            mic.drain()
+            scorer.fill(mic)    # 2.1초 동안 방 소리로 창을 채운다 — 이 동안은 조용히
             print(f"[{i:2d}/{n}] 🗣  모리야!", end="   ", flush=True)
             peak, audio = one_call(mic, scorer, window, thr)
             hit = peak >= thr
