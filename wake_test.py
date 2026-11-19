@@ -15,6 +15,9 @@ main.py 는 꺼 두기 — 마이크를 같이 못 연다.
      python wake_test.py --tv 10          # 10분
    몇 분을 듣든 '시간당 몇 번' 으로 바꿔서도 보여준다.
 
+여러 번 나눠 잰 인식률은 합쳐 볼 수 있다(마이크·모델 없이 csv 만 읽음).
+     python wake_test.py --summary logs/wake_test/calls_A.csv logs/wake_test/calls_B.csv
+
 결과는 logs/wake_test/ 에 csv 로 남는다. 못 알아들은 소리와 잘못 깬 소리는 wav 로도 남겨
 나중에 들어 볼 수 있다. Ctrl+C 로 언제 멈춰도 거기까지의 결과를 낸다.
 
@@ -169,6 +172,34 @@ def one_call(mic: Mic, scorer: Scorer, window: float, thr: float):
     return peak, peak_audio
 
 
+def print_calls(rows: list[dict], thr: float, title: str = ""):
+    n_done = len(rows)
+    print(f"\n━━ 인식률 ({n_done}번 부름{title}) ━━")
+    for t in thresholds_with(thr):
+        k = sum(r["peak"] >= t for r in rows)
+        now = "   ← 이번 기준" if t == thr else ""
+        print(f"  문턱 {t:.2f}:  {k:3d}/{n_done}   {k / n_done * 100:5.1f}%{now}")
+    peaks = sorted(r["peak"] for r in rows)
+    print(f"  점수 중앙값 {np.median(peaks):.3f} · 가장 낮은 것 {peaks[0]:.3f}")
+
+
+def summarize_files(paths: list[str], thr: float):
+    """여러 번 잰 인식률 csv 를 합쳐서 본다. 파일마다 한 줄, 그리고 모두 합친 표."""
+    rows, used = [], 0
+    for p in paths:
+        with open(p, encoding="utf-8") as f:
+            part = [{"peak": float(r["peak"])} for r in csv.DictReader(f) if r.get("peak")]
+        if not part:
+            print(f"  (비었거나 인식률 결과가 아님, 건너뜀) {p}")
+            continue
+        k = sum(r["peak"] >= thr for r in part)
+        print(f"  {Path(p).name}: {k}/{len(part)}  {k / len(part) * 100:.1f}% (문턱 {thr:.2f})")
+        rows += part
+        used += 1
+    if rows:
+        print_calls(rows, thr, f" · 파일 {used}개 합침")
+
+
 def run_calls(mic: Mic, scorer: Scorer, n: int, window: float, thr: float, stamp: str):
     print(f"\n화면에 '🗣  모리야!' 가 뜨면 한 번 불러 주세요. {n}번, 한 번에 {window:.0f}초씩 기다려요.")
     print(f"감지 기준은 {thr:.2f} 이에요. 차례 사이 2초쯤은 조용히 기다려 주세요. 멈추려면 Ctrl+C.")
@@ -194,14 +225,7 @@ def run_calls(mic: Mic, scorer: Scorer, n: int, window: float, thr: float, stamp
 
     if not rows:
         return
-    n_done = len(rows)
-    print(f"\n━━ 인식률 ({n_done}번 부름) ━━")
-    for t in thresholds_with(thr):
-        k = sum(r["peak"] >= t for r in rows)
-        now = "   ← 이번 기준" if t == thr else ""
-        print(f"  문턱 {t:.2f}:  {k:3d}/{n_done}   {k / n_done * 100:5.1f}%{now}")
-    peaks = sorted(r["peak"] for r in rows)
-    print(f"  점수 중앙값 {np.median(peaks):.3f} · 가장 낮은 것 {peaks[0]:.3f}")
+    print_calls(rows, thr)
     if miss_dir.exists():
         print(f"  못 들은 소리: {miss_dir.relative_to(ROOT)}/")
     write_csv(OUT_DIR / f"calls_{stamp}.csv", rows)
@@ -282,7 +306,13 @@ def main():
     ap.add_argument("--thr", type=float, default=0.7, help="감지 기준 (기본 0.7, main.py 와 같음)")
     ap.add_argument("--model", default=str(ROOT / "models" / "moriya_v5.onnx"))
     ap.add_argument("--device", type=int, default=None, help="마이크 번호 (기본: 시스템 기본 입력)")
+    ap.add_argument("--summary", nargs="+", metavar="CSV",
+                    help="재지 않고, 전에 잰 인식률 csv 들을 합쳐서 보기")
     a = ap.parse_args()
+
+    if a.summary:
+        summarize_files(a.summary, a.thr)
+        return
 
     det = MoriyaWakeWordDetector(
         moriya_model_path=Path(a.model), models_dir=ROOT / "models",
