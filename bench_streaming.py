@@ -17,12 +17,14 @@ RAG(기억 찾기)는 실제처럼 붙이되, 켬/끔이 같으므로 시간에�
   - main.py 는 꺼 두기 (systemctl --user stop mori). 스피커를 같이 쓴다.
   - .env 에 ANTHROPIC_API_KEY, FISH_API_KEY. 이 스크립트는 .env 의 LLM_ENGINE·TTS_ENGINE
     과 상관없이 claude + fish 로 돈다(스트리밍은 그 조합에서만 된다).
-  - 답이 스피커로 나온다. 30개 × 켬/끔 × 3번이면 180번 말해서 30분 넘게 걸린다.
+  - 답이 스피커로 나온다. 기본은 첫 목소리가 나오고 0.5초 뒤 끊는다(한 번에 5초 안팎,
+    다 하면 15분쯤). 답을 끝까지 들으며 '말을 다 마칠 때까지' 도 재려면 --full (30분 넘게).
 
 실행
   python bench_streaming.py              # 질문 30개 × 켬/끔 × 3번
   python bench_streaming.py -n 3 -r 1    # 시험 삼아: 앞 3개만 1번
   python bench_streaming.py -c 짧은답    # 한 분류만
+  python bench_streaming.py --full       # 답을 끝까지 듣기
 
 결과는 logs/bench_streaming/ 에 csv. 끝나면 분류별 중앙값 · p90(10번 중 9번은 이 안) ·
 최대를 켬/끔 나란히 보여준다. Ctrl+C 로 멈춰도 거기까지 결과를 낸다.
@@ -32,6 +34,7 @@ import argparse
 import csv
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -108,14 +111,24 @@ def get_context(M, question: str):
         return "", mark
 
 
-def run_once(M, client, question: str, mode: str) -> dict:
-    """질문 하나를 한 방식으로 돌려 시간을 잰다. 소리는 실제로 스피커로 나간다."""
+# 첫 목소리가 나오고 이만큼 듣고 끊는다(--full 이 아닐 때). 답을 끝까지 들으면 오래 걸린다.
+CUT_AFTER_SEC = 0.5
+
+
+def run_once(M, client, question: str, mode: str, full: bool = False) -> dict:
+    """질문 하나를 한 방식으로 돌려 시간을 잰다. 소리는 실제로 스피커로 나간다.
+
+    full 이 아니면 첫 목소리가 나오고 조금 뒤 말을 끊는다(첫 목소리 시각만 잰다).
+    """
     context, mark = get_context(M, question)
     box = {"voice": None}
+    stop = None if full else threading.Event()
 
     def on_voice():
         if box["voice"] is None:
             box["voice"] = time.perf_counter()
+            if stop is not None:
+                threading.Timer(CUT_AFTER_SEC, stop.set).start()
 
     reply = ""
     streamed = False
@@ -128,23 +141,23 @@ def run_once(M, client, question: str, mode: str) -> dict:
         rs = out.get("reply_stream")
         if rs is not None:
             streamed = True
-            M.tts_play_stream(rs, live, on_start=on_voice)
-            reply = rs.text()
+            M.tts_play_stream(rs, live, on_start=on_voice, stop_event=stop)
+            reply = rs.text()   # 끊었어도 LLM 이 다 쓸 때까지 기다린다(다음 질문과 겹치지 않게)
         else:                               # 스트리밍이 안 됐다(거절·형식 오류) → 다 받은 글로
             live.close()
             reply = out["reply"]
-            M.tts_play(reply, on_start=on_voice)
+            M.tts_play(reply, on_start=on_voice, stop_event=stop)
     else:
         out = M.chat_with_memory(client, question, context, mark=mark, stream=False)
         t_llm = time.perf_counter()        # 답 전체가 온 시각
         reply = out["reply"]
-        M.tts_play(reply, on_start=on_voice)
+        M.tts_play(reply, on_start=on_voice, stop_event=stop)
     t_end = time.perf_counter()
 
     return {
         "first_voice": round(box["voice"] - t0, 3) if box["voice"] else "",
         "llm": round(t_llm - t0, 3),
-        "total": round(t_end - t0, 3),
+        "total": round(t_end - t0, 3) if full else "",
         "reply_chars": len(reply),
         "streamed": int(streamed),
         "reply": reply,
@@ -172,6 +185,8 @@ def summarize(rows):
                 and (cat == "전체" or r["category"] == cat)]
 
     for key, title in (("first_voice", "첫 목소리까지"), ("total", "말을 다 마칠 때까지")):
+        if not any(r.get(key) not in (None, "") for r in rows):
+            continue
         print(f"\n━━ {title} (초 · 중앙값 / p90 / 최대) ━━")
         print(f"  {'분류':<6}  {'스트리밍 켬':<20}  {'끔':<20}  중앙값 차이")
         for cat in cats:
@@ -193,6 +208,8 @@ def main():
     ap.add_argument("-n", type=int, help="분류마다 앞에서 n개만")
     ap.add_argument("-c", "--category", choices=list(QUESTIONS), help="이 분류만")
     ap.add_argument("--gap", type=float, default=1.0, help="질문 사이 쉬는 초 (기본 1)")
+    ap.add_argument("--full", action="store_true",
+                    help="답을 끝까지 듣는다(말을 다 마칠 때까지도 잼). 기본은 첫 목소리 뒤 바로 끊음")
     a = ap.parse_args()
 
     M = load_main()
@@ -210,7 +227,7 @@ def main():
     print("\n🔥 몸풀기 (기록 안 함)")
     for mode in MODES:
         try:
-            run_once(M, client, "안녕", mode)
+            run_once(M, client, "안녕", mode, a.full)
         except Exception as e:
             print(f"⚠️  몸풀기 실패({mode}): {e}")
 
@@ -228,8 +245,9 @@ def main():
                     print(f"\n[{k}/{total}] {rep}회 · {cat} · 스트리밍 {mode} · {q}")
                     row = {"run": rep, "category": cat, "question": q, "mode": mode, "error": ""}
                     try:
-                        row.update(run_once(M, client, q, mode))
-                        print(f"   → 첫 목소리 {row['first_voice']}s · 끝까지 {row['total']}s")
+                        row.update(run_once(M, client, q, mode, a.full))
+                        done = f" · 끝까지 {row['total']}s" if a.full else ""
+                        print(f"   → 첫 목소리 {row['first_voice']}s{done}")
                     except Exception as e:
                         row["error"] = repr(e)[:200]
                         print(f"   ❌ 실패: {e}")
