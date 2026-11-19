@@ -271,6 +271,7 @@ emotion/
 ├── face_crop.py     얼굴 검출·crop·전처리 (인형과 학습 스크립트가 같이 씀)
 ├── emotion_service.py  발화 구간 동안 샘플링 → 다수결 라벨
 ├── webcam_emotion.py 노트북 웹캠으로 두 감정 모델 비교 (파이 없이)
+├── capture_faces.py 인형 카메라로 표정 평가 사진 찍기 (번호 누르면 감정 폴더에 저장)
 ├── train/           직접 학습 5감정 모델 학습 스크립트
 ├── face_tracker.py  얼굴 위치 → PD 제어 → Pixy2 팬틸트 (백그라운드)
 ├── pixy_servo.py    Pixy2 서보·색 블록 래퍼 (libpixyusb2)
