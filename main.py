@@ -200,6 +200,10 @@ MIC_SILENCE_END_MS = 1500
 # 잭에 꽂혀 있어야 한다 — 칩이 모리 목소리를 지워야 그걸 말씀으로 잘못 듣지 않는다.
 # USB 스피커처럼 칩을 거치지 않는 스피커면 모리가 제 목소리에 멈춘다. 그땐 끈다.
 BARGE_IN = os.getenv("BARGE_IN", "0") == "1"
+# 앱 볼륨 100% 일 때 끼어들기로 볼 마이크 크기 문턱. 모리가 말하다 제 목소리에 멈추면
+# 올리고, 말씀하셔도 안 멈추면 내린다(멈출 때 로그의 '마이크 N' 을 보고 그보다 높게).
+# 볼륨을 낮추면 모리 목소리도 작아지니 문턱도 같이 내려간다(녹음 문턱 아래로는 안 간다).
+BARGE_IN_ENERGY_THR = float(os.getenv("BARGE_IN_ENERGY_THR", "600"))
 
 # ⏱️ 타이밍 리포트에 표시할 단계 순서.
 TIMING_ORDER = ["녹음+VAD", "STT", "RAG", "LLM", "TTS 합성", "TTS 재생"]
@@ -241,7 +245,7 @@ from mic_vad import LiveRecorder, MicTap, strip_echo_prefix   # noqa: E402
 from audio_out import (                                                # noqa: E402
     play_wav, synthesize_and_play_stream, synthesize_and_play_fish, prewarm_fish,
     synthesize_and_play_fish_live, FishLiveConnection,
-    make_chime_wav, CHIMES, LoopPlayer, set_volume, playback_gain,
+    make_chime_wav, CHIMES, LoopPlayer, set_volume, app_gain,
 )
 from wakeword import MoriyaWakeWordDetector
 try:
@@ -1037,11 +1041,11 @@ def _open_mic_tap(barge: threading.Event | None = None,
     barge 를 주고 BARGE_IN 이 켜져 있으면, 말씀하시며 끼어들 때 barge 를 켠다.
     extra_grace_ms: 목소리 앞에 음악이 먼저 나가면 그 길이. 끼어들기를 그만큼 늦게 본다.
 
-    스피커를 원음보다 키우면(playback_gain > 1) 칩이 다 못 지운 모리 목소리도 그만큼
-    커져서, 모리가 제 목소리에 멈췄다. 끼어들기 문턱도 같은 배로 올린다. 원음(1배)에서
-    맞춰 둔 문턱이라, 이러면 모리 목소리 대비 문턱이 그때와 같아진다.
+    스피커를 키우면 칩이 다 못 지운 모리 목소리도 커져서 모리가 제 목소리에 멈췄다.
+    그래서 끼어들기 문턱은 앱 볼륨 100% 에서 BARGE_IN_ENERGY_THR 이고, 볼륨을 낮추면
+    모리 목소리가 작아지는 만큼 같이 내린다. 녹음 문턱보다 낮아지지는 않는다.
     """
-    thr = LiveRecorder.CHIP_ENERGY_THRESHOLD * max(1.0, playback_gain())
+    thr = max(LiveRecorder.CHIP_ENERGY_THRESHOLD, BARGE_IN_ENERGY_THR * app_gain())
     try:
         return MicTap(input_device_index=MIC_DEVICE_INDEX,
                       barge=(barge if BARGE_IN else None),

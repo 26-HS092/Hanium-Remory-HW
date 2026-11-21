@@ -61,9 +61,9 @@ def _gain() -> float:
     return _app_gain * SPEAKER_VOLUME
 
 
-def playback_gain() -> float:
-    """지금 소리를 원음의 몇 배로 내는지(앱 볼륨 × SPEAKER_VOLUME). 끼어들기 문턱에 쓴다."""
-    return _gain()
+def app_gain() -> float:
+    """앱 볼륨만큼 줄이는 배율(100% 면 1). 끼어들기 문턱을 볼륨에 맞춰 내리는 데 쓴다."""
+    return _app_gain
 
 
 _LIMIT_KNEE = 0.7   # 최대 크기의 70% 까지는 그대로, 그 위만 부드럽게 누른다

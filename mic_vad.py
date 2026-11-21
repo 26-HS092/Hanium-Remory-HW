@@ -189,6 +189,7 @@ class MicTap:
         self._barge = barge
         self._chip = None
         self._window: deque = deque(maxlen=max(1, self.BARGE_IN_MS // chunk_duration_ms))
+        self._rms: deque = deque(maxlen=self._window.maxlen)
         self._grace_frames = (self.BARGE_IN_GRACE_MS if grace_ms is None
                               else grace_ms) // chunk_duration_ms
         self._after_barge = 0        # 끼어드신 걸 알아챈 뒤 지난 프레임 수
@@ -238,11 +239,14 @@ class MicTap:
             self._grace_frames -= 1
             return
         x = np.frombuffer(data, dtype=np.int16).astype(np.float32)
-        loud = float(np.sqrt(np.mean(x ** 2))) > self._energy_thr
-        self._window.append(bool(self._chip.speech_detected()) and loud)
+        rms = float(np.sqrt(np.mean(x ** 2)))
+        self._rms.append(rms)
+        self._window.append(bool(self._chip.speech_detected()) and rms > self._energy_thr)
         if (len(self._window) == self._window.maxlen
                 and sum(self._window) >= self.BARGE_IN_RATIO * len(self._window)):
-            print("✋ 끼어드심 — 모리 말을 멈추고 듣습니다")
+            # 판정 창 동안의 마이크 크기. 모리 제 목소리에 멈췄으면 문턱을 이보다 높인다.
+            print(f"✋ 끼어드심 — 모리 말을 멈추고 듣습니다 "
+                  f"(마이크 {np.median(self._rms):.0f} / 문턱 {self._energy_thr:.0f})")
             self._barge.set()
 
     @property
