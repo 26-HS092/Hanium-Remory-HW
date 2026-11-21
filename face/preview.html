@@ -10,6 +10,8 @@
   #stage{flex:1;display:flex;flex-direction:column;gap:8px;min-width:0;}
   /* 실제 화면 비율(800x480) 그대로 */
   #frame{width:100%;aspect-ratio:800/480;border:0;border-radius:12px;background:#0e1216;}
+  /* 얼굴 화면은 인형 속 거꾸로 달린 LCD 에 맞춰 180도 돌아가 있다. 여기선 다시 돌려 바로 본다. */
+  #frame{transform:rotate(180deg);}
   #log{font-size:13px;color:#B9A88F;min-height:1.4em;}
   #panel{width:300px;overflow-y:auto;display:flex;flex-direction:column;gap:14px;}
   h3{margin:0 0 6px;font-size:13px;color:#FFD98A;}

@@ -6,6 +6,10 @@
 <title>모리 얼굴</title>
 <style>
   html,body{margin:0;height:100%;background:#0e1216;overflow:hidden;cursor:none;}
+  /* LCD 를 인형에 거꾸로 넣어서 화면 전체를 180도 돌린다. 터치 패널도 같이 뒤집혀
+     있고 브라우저가 돌아간 화면 기준으로 누른 곳을 찾으니, 터치는 따로 안 고쳐도 된다.
+     맥 미리보기(preview.html)는 iframe 을 다시 돌려 바로 보이게 한다. */
+  html{transform:rotate(180deg);}
   /* 얼굴을 문지르실 때 브라우저가 화면 넘기기로 가로채지 않게 막는다. */
   #face{position:fixed;inset:0;width:100vw;height:100vh;touch-action:none;
         -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
