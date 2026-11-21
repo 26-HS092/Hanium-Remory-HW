@@ -219,7 +219,7 @@ LLM 단독 판정을 그대로 알림으로 보내던 때보다 **오탐이 절�
 | **LLM** | Groq (`openai/gpt-oss-120b`) · `LLM_ENGINE=claude` 면 Claude (`claude-haiku-5-5`) | JSON 으로 `reply` + `expression` 동시 생성 · Claude 는 고정 프롬프트를 캐시 |
 | **TTS** | Fish Audio 스트리밍 (`TTS_ENGINE=cosyvoice` 면 CosyVoice2) | 앱에서 고른 Fish 목소리 모델로 말함 · 예전 CosyVoice 목소리면 `FISH_REFERENCE_ID` |
 | **얼굴 표시** | WebSocket(8765) → Chromium kiosk + SVG | 표정 6종 · 말할 때 입 움직임 · 웨이크워드 전구 · 알림 카드(약·메시지) · 사진 오버레이 |
-| **오디오 출력** | ALSA `aplay` (`plughw:CARD=UACDemoV10`) | 볼륨은 `amixer` 로 서버 설정값 반영 |
+| **오디오 출력** | ALSA `aplay` (`plughw:CARD=UACDemoV10`) | 앱 볼륨은 카드에 컨트롤이 있으면 `amixer`, 없으면(ReSpeaker 잭 스피커) 소리를 줄여 냄 |
 
 ---
 
@@ -373,7 +373,7 @@ STT_ENGINE=hailo                  # clova 면 CLOVA_CLIENT_ID · CLOVA_CLIENT_SE
 TRACK_BACKEND=hailo               # pixy 면 Pixy2 팬틸트
 MMWAVE_PORT=/dev/ttyAMA0          # MMWAVE_ENABLED=false 로 끌 수 있음
 
-AUDIO_CONTROL=PCM                 # amixer scontrols 로 확인
+AUDIO_CONTROL=PCM                 # amixer scontrols 로 확인 (없으면 소프트웨어 볼륨)
 CONVERSATION_LOG_DIR=./conversations
 ```
 

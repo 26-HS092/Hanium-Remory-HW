@@ -14,6 +14,7 @@ Pi 설치: sudo apt install mpg123
 from __future__ import annotations
 
 import hashlib
+import io
 import math
 import os
 import platform
@@ -24,6 +25,7 @@ import wave
 import threading
 import subprocess
 import time
+import numpy as np
 import requests
 from pathlib import Path
 
@@ -36,6 +38,58 @@ SPEAKER_ALSA_DEVICE = os.getenv("SPEAKER_ALSA_DEVICE", "plughw:CARD=UACDemoV10")
 # 하드웨어 볼륨(amixer)을 먼저 올리고도 작으면 이 값을 키우세요(너무 크면 찢어짐).
 SPEAKER_VOLUME = 1.0
 
+# 🔊 앱에서 정한 볼륨을 소리에 곱하는 값. set_volume() 으로 바꾼다.
+# ReSpeaker 잭에 꽂은 아날로그 스피커처럼 카드에 볼륨 컨트롤(amixer)이 없을 때 쓴다.
+# 재생을 시작할 때 읽으므로, 바꾸면 다음 소리부터 반영된다.
+_app_gain = 1.0
+
+
+def set_volume(percent) -> None:
+    """앱 볼륨(0~100%)을 소프트웨어 볼륨으로 맞춘다. 100 이면 원음 그대로.
+
+    귀는 소리 크기를 비율로 듣기 때문에 그대로 곱하면 50% 도 거의 그대로 크게 들린다.
+    제곱해서 곱한다(50% → 0.25배, 약 -12dB). amixer 의 % 와 비슷하게 들린다.
+    """
+    global _app_gain
+    p = max(0.0, min(100.0, float(percent))) / 100.0
+    _app_gain = p * p
+
+
+def _gain() -> float:
+    return _app_gain * SPEAKER_VOLUME
+
+
+def _scale_pcm(data: bytes, gain: float) -> bytes:
+    """16bit PCM 소리 크기를 gain 배로. 넘치는 값은 잘라서 찢어지는 소리를 줄인다."""
+    a = np.frombuffer(data, dtype="<i2").astype(np.float32) * gain
+    return np.clip(a, -32768, 32767).astype("<i2").tobytes()
+
+
+def _wav_play(path: str, gain: float) -> tuple[list[str], bytes | None] | None:
+    """wav 를 gain 크기로 한 번 재생하는 (명령, stdin 에 넣을 내용). 재생기가 없으면 None.
+
+    aplay 에는 볼륨 옵션이 없어서, gain 이 1 이 아니면 소리를 줄인 wav 를 stdin 으로 넣는다.
+    """
+    if platform.system() == "Linux" and shutil.which("aplay"):
+        cmd = ["aplay", "-q"]
+        if SPEAKER_ALSA_DEVICE:
+            cmd.extend(["-D", SPEAKER_ALSA_DEVICE])
+        if gain == 1.0:
+            return cmd + [path], None
+        with wave.open(path, "rb") as r:
+            params = r.getparams()
+            frames = r.readframes(r.getnframes())
+        if params.sampwidth != 2:        # 16bit 가 아니면 줄이지 못하고 그대로 낸다
+            return cmd + [path], None
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setparams(params)
+            w.writeframes(_scale_pcm(frames, gain))
+        return cmd + ["-"], out.getvalue()
+    if platform.system() == "Darwin":
+        return ["afplay", "-v", str(gain), path], None
+    return None
+
 
 def play_mp3(path: str) -> None:
     p = Path(path)
@@ -43,21 +97,22 @@ def play_mp3(path: str) -> None:
         raise FileNotFoundError(path)
 
     system = platform.system()
+    gain = _gain()
 
     if system == "Linux":
         if shutil.which("mpg123"):
             cmd = ["mpg123", "-q"]
             if SPEAKER_ALSA_DEVICE:
                 cmd.extend(["-a", SPEAKER_ALSA_DEVICE])
-            if SPEAKER_VOLUME != 1.0:                       # -f: 32768=원음
-                cmd.extend(["-f", str(int(32768 * SPEAKER_VOLUME))])
+            if gain != 1.0:                                 # -f: 32768=원음
+                cmd.extend(["-f", str(int(32768 * gain))])
             cmd.append(str(p))
             subprocess.run(cmd, check=True)
             return
         if shutil.which("ffplay"):
             cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]
-            if SPEAKER_VOLUME != 1.0:
-                cmd.extend(["-af", f"volume={SPEAKER_VOLUME}"])
+            if gain != 1.0:
+                cmd.extend(["-af", f"volume={gain}"])
             cmd.append(str(p))
             subprocess.run(cmd, check=True)
             return
@@ -66,7 +121,7 @@ def play_mp3(path: str) -> None:
         )
 
     if system == "Darwin":
-        subprocess.run(["afplay", str(p)], check=True)
+        subprocess.run(["afplay", "-v", str(gain), str(p)], check=True)
         return
 
     # Windows: playsound (pip install playsound==1.2.2 권장)
@@ -98,24 +153,12 @@ def _mp3_cmd(path: str, volume: float) -> list[str] | None:
     return None
 
 
-def _wav_cmd(path: str) -> list[str] | None:
-    """wav 를 한 번 재생하는 명령(aplay). 쓸 수 있는 재생기가 없으면 None."""
-    if platform.system() == "Linux" and shutil.which("aplay"):
-        cmd = ["aplay", "-q"]
-        if SPEAKER_ALSA_DEVICE:
-            cmd.extend(["-D", SPEAKER_ALSA_DEVICE])
-        return cmd + [path]
-    if platform.system() == "Darwin":
-        return ["afplay", path]
-    return None
-
-
 class LoopPlayer:
     """wav(또는 mp3)를 멈출 때까지 되풀이해 튼다. 생각하는 동안 까는 음악에 쓴다.
 
     wav 는 aplay 로 튼다. mpg123 은 여는 순간 스피커가 바쁘면 장치가 풀린 뒤에도
     소리 없이 멈춰 버리는데, aplay 는 바로 실패해서 잠깐 뒤 다시 열 수 있다.
-    wav 는 volume 을 따르지 않는다 — 파일 음량을 맞춰 두고 쓴다.
+    볼륨(volume × 앱 볼륨)은 start() 할 때 정해진다.
 
     stop() 은 재생기가 완전히 꺼질 때까지 기다린다. 스피커(ALSA hw 장치)는
     한 번에 하나만 열 수 있어서, 덜 꺼진 채로 TTS 가 aplay 를 열면 부딪친다.
@@ -125,7 +168,7 @@ class LoopPlayer:
 
     def __init__(self, path: str, volume: float = 1.0):
         self._path = str(path)
-        self._volume = volume * SPEAKER_VOLUME
+        self._volume = volume
         self._stop = threading.Event()
         # 재생기를 띄우는 순간과 끄는 순간이 엇갈려 하나가 남지 않게 한다.
         self._lock = threading.Lock()
@@ -135,17 +178,24 @@ class LoopPlayer:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        if not Path(self._path).exists():
+            return
+        gain = self._volume * _gain()
+        data = None
         if self._path.lower().endswith(".wav"):
-            cmd = _wav_cmd(self._path)
+            play = _wav_play(self._path, gain)
+            if not play:
+                return
+            cmd, data = play
         else:
-            cmd = _mp3_cmd(self._path, self._volume)
-        if not cmd or not Path(self._path).exists():
+            cmd = _mp3_cmd(self._path, gain)
+        if not cmd:
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, args=(cmd,), daemon=True)
+        self._thread = threading.Thread(target=self._run, args=(cmd, data), daemon=True)
         self._thread.start()
 
-    def _run(self, cmd: list[str]) -> None:
+    def _run(self, cmd: list[str], data: bytes | None = None) -> None:
         warned = False
         while True:
             with self._lock:
@@ -153,11 +203,12 @@ class LoopPlayer:
                     return
                 try:
                     self._proc = subprocess.Popen(
-                        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        stdin=subprocess.PIPE if data is not None else None)
                 except OSError as e:
                     print(f"⚠️  로딩 음악 재생 실패: {e}")
                     return
-            _, err = self._proc.communicate()
+            _, err = self._proc.communicate(input=data)
             # 멈추라고 해서 꺼진 게 아니면, 스피커가 잠깐 바빴을 수 있으니 다시 연다.
             # 왜 못 틀었는지는 한 번만 남긴다.
             if self._proc.returncode != 0 and not self._stop.is_set():
@@ -195,19 +246,17 @@ def play_wav(path: str) -> None:
         raise FileNotFoundError(path)
 
     system = platform.system()
+    gain = _gain()
 
     if system == "Linux":
         if shutil.which("aplay"):
-            cmd = ["aplay", "-q"]
-            if SPEAKER_ALSA_DEVICE:
-                cmd.extend(["-D", SPEAKER_ALSA_DEVICE])
-            cmd.append(str(p))
-            subprocess.run(cmd, check=True)
+            cmd, data = _wav_play(str(p), gain)
+            subprocess.run(cmd, input=data, check=True)
             return
         if shutil.which("ffplay"):
             cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]
-            if SPEAKER_VOLUME != 1.0:
-                cmd.extend(["-af", f"volume={SPEAKER_VOLUME}"])
+            if gain != 1.0:
+                cmd.extend(["-af", f"volume={gain}"])
             cmd.append(str(p))
             subprocess.run(cmd, check=True)
             return
@@ -216,7 +265,7 @@ def play_wav(path: str) -> None:
         )
 
     if system == "Darwin":
-        subprocess.run(["afplay", str(p)], check=True)
+        subprocess.run(["afplay", "-v", str(gain), str(p)], check=True)
         return
 
     # Windows: playsound (pip install playsound==1.2.2 권장)
@@ -581,10 +630,22 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
          "-D", SPEAKER_ALSA_DEVICE, "-"],
         stdin=subprocess.PIPE
     )
+    # 앱 볼륨. 받은 조각이 샘플(2바이트) 중간에서 끊길 수 있어 남은 1바이트는 다음에 붙인다.
+    gain = _gain()
+    odd = b""
+
+    def write(data: bytes) -> None:
+        nonlocal odd
+        if gain != 1.0:
+            data = odd + data
+            cut = len(data) & ~1
+            data, odd = _scale_pcm(data[:cut], gain), data[cut:]
+        proc.stdin.write(data)
+
     # 목소리가 실제로 들리기 시작하는 시각. 효과음이 앞에 있으면 그게 끝난 뒤다.
     voice_at = time.perf_counter()
     if lead_pcm:
-        proc.stdin.write(lead_pcm)      # 파이프에 바로 들어가고, aplay 가 곧 낸다
+        write(lead_pcm)                 # 파이프에 바로 들어가고, aplay 가 곧 낸다
         proc.stdin.flush()
         voice_at += len(lead_pcm) / (sample_rate * 2)
     if before_play:
@@ -630,17 +691,17 @@ def _stream_and_play(open_stream, sample_rate, buffer_bytes, on_start, label,
         if not started:
             buf += chunk
             if len(buf) >= buffer_bytes:
-                proc.stdin.write(buf)
+                write(buf)
                 buf = b""
                 started = True
                 t_first = time.perf_counter()
                 voice_started()
         else:
-            proc.stdin.write(chunk)
+            write(chunk)
 
     if not interrupted:
         if not started and buf:
-            proc.stdin.write(buf)
+            write(buf)
             t_first = time.perf_counter()
             voice_started()
         proc.stdin.close()

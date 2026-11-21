@@ -122,7 +122,8 @@ MEMORY_PHOTO_MAX_SEC = 15
 MEMORY_PHOTO_COOLDOWN_TURNS = 2
 # 어르신 추억(RAG)을 백엔드에서 몇 초마다 동기화할지
 RAG_SYNC_INTERVAL_SEC = 300
-# 스피커 볼륨 조절용 ALSA 컨트롤 이름 (amixer scontrols 로 확인)
+# 스피커 볼륨 조절용 ALSA 컨트롤 이름 (amixer -c <카드> scontrols 로 확인).
+# 컨트롤이 없거나 amixer 가 실패하면 apply_volume() 이 소프트웨어 볼륨으로 대신한다.
 AUDIO_CONTROL = os.getenv("AUDIO_CONTROL", "PCM")
 # 볼륨을 바꿀 카드. audio_out.SPEAKER_ALSA_DEVICE 와 같은 USB 스피커여야 한다(aplay -l 로 확인).
 AUDIO_CARD    = os.getenv("AUDIO_CARD", "UACDemoV10")
@@ -240,7 +241,7 @@ from mic_vad import LiveRecorder, MicTap, strip_echo_prefix   # noqa: E402
 from audio_out import (                                                # noqa: E402
     play_wav, synthesize_and_play_stream, synthesize_and_play_fish, prewarm_fish,
     synthesize_and_play_fish_live, FishLiveConnection,
-    make_chime_wav, CHIMES, LoopPlayer,
+    make_chime_wav, CHIMES, LoopPlayer, set_volume,
 )
 from wakeword import MoriyaWakeWordDetector
 try:
@@ -2025,19 +2026,27 @@ def rag_sync_worker(vision_model):
 
 
 def apply_volume(vol):
-    """스피커 볼륨을 vol(%)로 설정 (ALSA amixer)."""
-    try:
-        # 카드를 지정하지 않으면 default 카드(HDMI)의 PCM 이 바뀌어 스피커엔 반영이 안 된다.
-        r = subprocess.run(
-            ["amixer", "-q", "-c", AUDIO_CARD, "sset", AUDIO_CONTROL, f"{int(vol)}%"],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            print(f"⚠️  볼륨 설정 실패(card={AUDIO_CARD}, {AUDIO_CONTROL}): {r.stderr.strip()}")
-            return
-        print(f"🔊 볼륨 {vol}% 적용")
-    except Exception as e:
-        print(f"⚠️  볼륨 설정 실패: {e}")
+    """스피커 볼륨을 vol(%)로 맞춘다.
+
+    카드에 볼륨 컨트롤이 있으면(amixer) 그걸로, 없으면 소리 자체를 줄여 낸다(소프트웨어).
+    ReSpeaker 3.5mm 잭에 꽂은 아날로그 스피커는 컨트롤이 없어서 소프트웨어로 간다.
+    둘을 같이 쓰면 두 번 줄어드니, amixer 가 되면 소프트웨어 쪽은 원음(100%)으로 둔다.
+    """
+    if AUDIO_CARD and AUDIO_CONTROL:
+        try:
+            # 카드를 지정하지 않으면 default 카드(HDMI)의 PCM 이 바뀌어 스피커엔 반영이 안 된다.
+            r = subprocess.run(
+                ["amixer", "-q", "-c", AUDIO_CARD, "sset", AUDIO_CONTROL, f"{int(vol)}%"],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                set_volume(100)
+                print(f"🔊 볼륨 {vol}% 적용(amixer {AUDIO_CARD}/{AUDIO_CONTROL})")
+                return
+        except Exception:
+            pass
+    set_volume(vol)
+    print(f"🔊 볼륨 {vol}% 적용(소프트웨어)")
 
 
 def in_dnd(dnd, now=None):
