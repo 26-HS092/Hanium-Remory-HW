@@ -35,9 +35,10 @@ from pathlib import Path
 SPEAKER_ALSA_DEVICE = os.getenv("SPEAKER_ALSA_DEVICE", "plughw:CARD=UACDemoV10")
 
 # 🔊 재생 볼륨(소프트웨어 증폭). 1.0=원음, 2.0=2배, 0.5=절반. 앱 볼륨 100% 일 때 이만큼 낸다.
-# .env 의 SPEAKER_VOLUME 으로 바꾼다. ReSpeaker 잭은 출력이 작아서 기본 2배로 키운다.
+# .env 의 SPEAKER_VOLUME 으로 바꾼다. ReSpeaker 잭은 출력이 작아서 기본 1.5배로 키운다.
+# 2배로 했더니 칩이 다 못 지운 모리 목소리가 끼어들기로 잡혀 모리가 제 말에 멈췄다.
 # 넘치는 소리는 _scale_pcm 이 부드럽게 눌러 찢어지지 않게 하지만, 3 넘게 키우면 뭉개진다.
-SPEAKER_VOLUME = float(os.getenv("SPEAKER_VOLUME", "2.0"))
+SPEAKER_VOLUME = float(os.getenv("SPEAKER_VOLUME", "1.5"))
 
 # 🔊 앱에서 정한 볼륨을 소리에 곱하는 값. set_volume() 으로 바꾼다.
 # ReSpeaker 잭에 꽂은 아날로그 스피커처럼 카드에 볼륨 컨트롤(amixer)이 없을 때 쓴다.
@@ -58,6 +59,11 @@ def set_volume(percent) -> None:
 
 def _gain() -> float:
     return _app_gain * SPEAKER_VOLUME
+
+
+def playback_gain() -> float:
+    """지금 소리를 원음의 몇 배로 내는지(앱 볼륨 × SPEAKER_VOLUME). 끼어들기 문턱에 쓴다."""
+    return _gain()
 
 
 _LIMIT_KNEE = 0.7   # 최대 크기의 70% 까지는 그대로, 그 위만 부드럽게 누른다

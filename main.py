@@ -241,7 +241,7 @@ from mic_vad import LiveRecorder, MicTap, strip_echo_prefix   # noqa: E402
 from audio_out import (                                                # noqa: E402
     play_wav, synthesize_and_play_stream, synthesize_and_play_fish, prewarm_fish,
     synthesize_and_play_fish_live, FishLiveConnection,
-    make_chime_wav, CHIMES, LoopPlayer, set_volume,
+    make_chime_wav, CHIMES, LoopPlayer, set_volume, playback_gain,
 )
 from wakeword import MoriyaWakeWordDetector
 try:
@@ -1036,11 +1036,17 @@ def _open_mic_tap(barge: threading.Event | None = None,
 
     barge 를 주고 BARGE_IN 이 켜져 있으면, 말씀하시며 끼어들 때 barge 를 켠다.
     extra_grace_ms: 목소리 앞에 음악이 먼저 나가면 그 길이. 끼어들기를 그만큼 늦게 본다.
+
+    스피커를 원음보다 키우면(playback_gain > 1) 칩이 다 못 지운 모리 목소리도 그만큼
+    커져서, 모리가 제 목소리에 멈췄다. 끼어들기 문턱도 같은 배로 올린다. 원음(1배)에서
+    맞춰 둔 문턱이라, 이러면 모리 목소리 대비 문턱이 그때와 같아진다.
     """
+    thr = LiveRecorder.CHIP_ENERGY_THRESHOLD * max(1.0, playback_gain())
     try:
         return MicTap(input_device_index=MIC_DEVICE_INDEX,
                       barge=(barge if BARGE_IN else None),
-                      grace_ms=MicTap.BARGE_IN_GRACE_MS + extra_grace_ms)
+                      grace_ms=MicTap.BARGE_IN_GRACE_MS + extra_grace_ms,
+                      energy_thr=thr)
     except Exception as e:
         print(f"⚠️  말끝 겹쳐 듣기 마이크 열기 실패: {e}")
         return None

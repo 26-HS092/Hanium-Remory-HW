@@ -172,8 +172,13 @@ class MicTap:
 
     def __init__(self, rate: int = 16000, chunk_duration_ms: int = 30,
                  tail_ms: int = 1000, input_device_index: int | None = None,
-                 barge: threading.Event | None = None, grace_ms: int | None = None):
+                 barge: threading.Event | None = None, grace_ms: int | None = None,
+                 energy_thr: float | None = None):
         self.rate = rate
+        # 끼어들기로 볼 마이크 크기 문턱. 스피커를 키우면 칩이 덜 지운 모리 목소리도
+        # 같이 커지니, 부르는 쪽이 볼륨에 맞춰 올려 준다(main._open_mic_tap).
+        self._energy_thr = (LiveRecorder.CHIP_ENERGY_THRESHOLD if energy_thr is None
+                            else energy_thr)
         self.chunk_size = int(rate * chunk_duration_ms / 1000)
         self.tail: list[bytes] = []
         self._tail = deque(maxlen=max(1, tail_ms // chunk_duration_ms))
@@ -233,7 +238,7 @@ class MicTap:
             self._grace_frames -= 1
             return
         x = np.frombuffer(data, dtype=np.int16).astype(np.float32)
-        loud = float(np.sqrt(np.mean(x ** 2))) > LiveRecorder.CHIP_ENERGY_THRESHOLD
+        loud = float(np.sqrt(np.mean(x ** 2))) > self._energy_thr
         self._window.append(bool(self._chip.speech_detected()) and loud)
         if (len(self._window) == self._window.maxlen
                 and sum(self._window) >= self.BARGE_IN_RATIO * len(self._window)):
