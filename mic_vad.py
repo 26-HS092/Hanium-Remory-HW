@@ -171,7 +171,7 @@ class MicTap:
     BARGE_IN_GRACE_MS = int(os.getenv("BARGE_IN_GRACE_MS", "1000"))
 
     def __init__(self, rate: int = 16000, chunk_duration_ms: int = 30,
-                 tail_ms: int = 1000, input_device_index: int | None = None,
+                 tail_ms: int = 1500, input_device_index: int | None = None,
                  barge: threading.Event | None = None, grace_ms: int | None = None,
                  energy_thr: float | None = None):
         self.rate = rate
@@ -349,7 +349,7 @@ class LiveRecorder:
         on_level=None,
         on_pause=None,
         tap: "MicTap | None" = None,
-        overlap_window_ms: int = 600,
+        overlap_window_ms: int = 1000,
         stop_event=None,
     ) -> str | None:
         """
@@ -389,7 +389,11 @@ class LiveRecorder:
         overlap_frames = overlap_window_ms // self.chunk_duration_ms
 
         start_win: deque = deque(maxlen=10)   # 발화 시작 판단용(최근 0.3초)
-        pre_buffer: deque = deque(maxlen=10)  # 말 앞부분 잘림 방지
+        # 말 앞부분 잘림 방지. 시작 판정(0.3초 창)이 늦게 서는 작은 목소리도 담게 0.6초.
+        pre_buffer: deque = deque(maxlen=20)
+        # 인형 말이 끝난 뒤 겹침 창 안의 소리 전부. 꼬리(tap.tail)와 이어 붙여야 빈틈이
+        # 없다 — pre_buffer 만 쓰면 창이 그보다 길 때 가운데가 빠졌다.
+        since_tap: list[bytes] = []
 
         frames: list[bytes] = []
         recording_started = False
@@ -471,6 +475,8 @@ class LiveRecorder:
                         break
 
                     pre_buffer.append(data)
+                    if tap is not None and waited_frames <= overlap_frames:
+                        since_tap.append(data)
                     start_win.append(1 if valid_speech else 0)
                     if len(start_win) == start_win.maxlen and sum(start_win) > 5:
                         print("▶️  말 시작 감지")
@@ -479,9 +485,11 @@ class LiveRecorder:
                         tr_src = vad_src
                         if tap is not None and tap.tail and waited_frames <= overlap_frames:
                             frames.extend(tap.tail)
+                            frames.extend(since_tap)
                             self.used_overlap = True
                             print("↩️  말끝과 겹친 대답 — 앞부분을 붙여 녹음")
-                        frames.extend(pre_buffer)
+                        else:
+                            frames.extend(pre_buffer)
                         pre_buffer.clear()
                         silence_run = 0
                         speech_run = 0
