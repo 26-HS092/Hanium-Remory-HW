@@ -23,13 +23,13 @@ SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
 
 # 측정한 중앙값과 안전 범위
-PAN_CENTER = 84
-PAN_MIN = 44
-PAN_MAX = 124
+PAN_CENTER = 82
+PAN_MIN = 66
+PAN_MAX = 112
 
-TILT_CENTER = 108
-TILT_MIN = 88
-TILT_MAX = 158
+TILT_CENTER = 72
+TILT_MIN = 38
+TILT_MAX = 72
 
 # 카메라 (IMX219 = Pi Camera v2)
 # 640x480 센서 모드는 가운데만 잘라 써서 화각이 24°밖에 안 된다.
@@ -39,8 +39,11 @@ TILT_MAX = 158
 CAPTURE_SIZE = (1280, 960)
 FRAME_SIZE = (640, 480)
 SENSOR_SIZE = (1640, 1232)
-HFOV = 62.2         # 가로 화각 (도)
-VFOV = 48.8         # 세로 화각 (도)
+# 화면 가운데만 잘라 확대하는 배율 (1.0 = 원래 화각).
+# 인형 구멍에 가려진 가장자리를 버린다. 화각이 그만큼 좁아진다.
+ZOOM = 1.5
+HFOV = 62.2 / ZOOM  # 가로 화각 (도)
+VFOV = 48.8 / ZOOM  # 세로 화각 (도)
 DEG_PER_PX_X = HFOV / FRAME_SIZE[0]
 DEG_PER_PX_Y = VFOV / FRAME_SIZE[1]
 
@@ -48,18 +51,21 @@ DEG_PER_PX_Y = VFOV / FRAME_SIZE[1]
 DEAD_ZONE = 15       # 중앙 부근(픽셀)에서는 움직이지 않음
 KP = 0.4             # 한 프레임에 남은 각도 오차의 몇 %를 줄일지
 MAX_SPEED = 90.0     # 최대 회전 속도 (도/초)
+# 좌우 서보는 틸트 서보와 카메라를 얹고 돌아서 빨리 돌면 전류가 튀어 꺼진다.
+# 어떤 모드(추적·탐색·돌아보기)든 좌우는 이 속도(도/초)를 넘지 않게 한다.
+PAN_MAX_SPEED = 40.0
 SMOOTHING = 0.6      # 작을수록 부드럽지만 반응이 느림
 HEAD_Y_RATIO = 0.1   # 얼굴·어깨가 안 보일 때 박스 위에서 이 비율 지점을 머리로 봄
 
 # 방향이 반대라면 해당 값을 -1로 변경
 # (AUTO_CALIBRATE가 켜져 있으면 시작할 때 직접 재서 덮어씀)
-PAN_DIRECTION = 1
-TILT_DIRECTION = -1
+PAN_DIRECTION = -1
+TILT_DIRECTION = 1
 
 # 시작할 때 서보를 살짝 돌려 화면이 밀리는 방향·거리로
 # 방향과 "서보 1도 = 화면 몇 픽셀"을 직접 잰다.
 # 카메라 앞이 무늬 없는 벽·천장이면 측정이 안 돼서 위 설정값을 그대로 씀
-AUTO_CALIBRATE = True
+AUTO_CALIBRATE = False
 CALIBRATE_STEP = 8          # 시험으로 돌려볼 각도
 CALIBRATE_MIN_INLIERS = 40  # 이만큼 특징점이 같은 방향으로 움직여야 믿음
 
@@ -611,6 +617,7 @@ class HailoFaceTracker:
 
         self.pan = float(PAN_CENTER)
         self.tilt = float(TILT_CENTER)
+        self.sent_pan = self.pan   # 마지막으로 보낸 좌우 각도 (속도 제한 기준)
         self.pan_dir, self.tilt_dir = PAN_DIRECTION, TILT_DIRECTION
         self.pan_deg_per_px, self.tilt_deg_per_px = DEG_PER_PX_X, DEG_PER_PX_Y
 
@@ -689,6 +696,13 @@ class HailoFaceTracker:
 
         self.camera.start()
         self.camera_started = True
+        if ZOOM > 1.0:
+            # 센서 전체 영역의 가운데를 1/ZOOM 크기로 잘라 쓴다.
+            x0, y0, w0, h0 = self.camera.camera_properties["ScalerCropMaximum"]
+            w, h = round(w0 / ZOOM), round(h0 / ZOOM)
+            self.camera.set_controls({
+                "ScalerCrop": (x0 + (w0 - w) // 2, y0 + (h0 - h) // 2, w, h)
+            })
         time.sleep(1)
 
         auto = AUTO_CALIBRATE if self.auto_calibrate is None else self.auto_calibrate
@@ -927,6 +941,12 @@ class HailoFaceTracker:
         with self._snapshot_lock:
             self._snapshot = (full, face_full)
 
+        # 좌우는 천천히: 한 프레임에 PAN_MAX_SPEED 만큼만 (프레임이 밀려도 0.1초치까지만)
+        self.pan = step_toward(
+            self.sent_pan, self.pan, PAN_MAX_SPEED * min(dt, 0.1)
+        )
+        self.sent_pan = self.pan
+
         # 계산한 각도 전송
         command, reply, success = send_angles(
             self.arduino, self.pan, self.tilt
@@ -1111,8 +1131,16 @@ class HailoFaceTracker:
 
     def _park(self):
         """정면으로 돌려 놓고 탐색 상태를 비운다. 추적 스레드에서만 부른다."""
-        self.pan, self.tilt = float(PAN_CENTER), float(TILT_CENTER)
-        send_angles(self.arduino, self.pan, self.tilt)
+        # 좌우는 한 번에 휙 돌리지 않고 PAN_MAX_SPEED 로 천천히 정면까지
+        self.tilt = float(TILT_CENTER)
+        tick = 0.05
+        while True:
+            self.pan = step_toward(self.pan, float(PAN_CENTER), PAN_MAX_SPEED * tick)
+            send_angles(self.arduino, self.pan, self.tilt)
+            if self.pan == PAN_CENTER:
+                break
+            time.sleep(tick)
+        self.sent_pan = self.pan
         self.mode = "scan"
         self._start_scan()
         self.seen_frames = 0

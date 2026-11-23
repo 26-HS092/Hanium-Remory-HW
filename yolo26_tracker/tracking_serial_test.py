@@ -17,13 +17,13 @@ SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
 
 # 측정한 중앙값과 안전 범위
-PAN_CENTER = 84
-PAN_MIN = 44
-PAN_MAX = 124
+PAN_CENTER = 82
+PAN_MIN = 66
+PAN_MAX = 112
 
-TILT_CENTER = 108
-TILT_MIN = 88
-TILT_MAX = 158
+TILT_CENTER = 72
+TILT_MIN = 38
+TILT_MAX = 72
 
 # 추적 설정
 DEAD_ZONE = 35       # 중앙 부근에서는 움직이지 않음
@@ -32,8 +32,8 @@ MAX_STEP = 3.0      # 한 번에 이동할 최대 각도
 SMOOTHING = 0.4     # 작을수록 부드럽지만 반응이 느림
 
 # 방향이 반대라면 해당 값을 -1로 변경
-PAN_DIRECTION = 1
-TILT_DIRECTION = -1
+PAN_DIRECTION = -1
+TILT_DIRECTION = 1
 
 # 결과 사진은 1초마다 저장
 IMAGE_SAVE_INTERVAL = 1.0
