@@ -229,6 +229,8 @@ LLM 단독 판정을 그대로 알림으로 보내던 때보다 **오탐이 절�
 main.py              🎯 통합 파이프라인 + 백그라운드 워커 6종
 main_fish.py         예전 실행 파일 (이제 main.py 와 같음)
 wakeword.py          "모리야" 감지 (openWakeWord 임베딩 → ONNX)
+wake_test.py         웨이크워드만 따로 재기 (N번 불러 인식률 · TV 틀어 두고 오인식)
+bench_streaming.py   스트리밍 켬/끔 응답 시간 비교 (같은 질문 30개 → 첫 목소리까지)
 mic_vad.py           라이브 VAD 녹음 (발화 시작/끝 콜백 제공)
 mmwave.py            mmWave 레이더로 곁에 사람이 있는지 확인
 audio_out.py         스피커 재생 + Fish Audio / CosyVoice2 스트리밍 TTS
@@ -270,6 +272,7 @@ emotion/
 ├── face_crop.py     얼굴 검출·crop·전처리 (인형과 학습 스크립트가 같이 씀)
 ├── emotion_service.py  발화 구간 동안 샘플링 → 다수결 라벨
 ├── webcam_emotion.py 노트북 웹캠으로 두 감정 모델 비교 (파이 없이)
+├── capture_faces.py 인형 카메라로 표정 평가 사진 찍기 (번호 누르면 감정 폴더에 저장)
 ├── train/           직접 학습 5감정 모델 학습 스크립트
 ├── face_tracker.py  얼굴 위치 → PD 제어 → Pixy2 팬틸트 (백그라운드)
 ├── pixy_servo.py    Pixy2 서보·색 블록 래퍼 (libpixyusb2)

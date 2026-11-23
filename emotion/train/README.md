@@ -62,6 +62,16 @@ AI Hub 는 대부분 젊은~중년 배우의 연기 표정이라 어르신 표�
 .venv/bin/python evaluate.py --data ~/elder_faces --detect
 ```
 
+인형 카메라로 직접 찍을 때는 `emotion/capture_faces.py` 를 쓴다(main.py 는 끄고).
+번호(1 기쁨 · 2 슬픔 · 3 분노 · 4 불안 · 5 중립)를 누르면 인형과 같은 카메라 설정으로 찍어
+`~/인형사진/<조건>/<감정>/<이름>_<번호>.jpg` 에 저장한다. 얼굴을 못 찾은 사진은 저장하지 않는다.
+
+```bash
+python emotion/capture_faces.py --who 수아                 # 조건 '기본'
+python emotion/capture_faces.py --who 수아 --cond 어두움 --delay 3
+python evaluate.py --data ~/인형사진/기본 --detect   # 파이에서도 됨(torch 불필요, scikit-learn·tqdm 필요)
+```
+
 ## 4. 인형에 넣기
 
 `models/emotion_ko5.onnx` 는 저장소에 같이 올라가 있어 파이에서 `git pull` 하면 끝.

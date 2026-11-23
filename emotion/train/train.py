@@ -29,26 +29,12 @@ from torch.utils.data import DataLoader, Dataset
 import timm
 from tqdm import tqdm
 
-from labels import MODELS_DIR, TARGET_LABELS, folder_to_target
+from labels import MODELS_DIR, TARGET_LABELS, folder_to_target, list_samples, print_confusion
 import face_crop
 
 HSEMOTION_PT = os.path.join(MODELS_DIR, "enet_b0_8_best_afew.pt")
 HSEMOTION_URL = ("https://github.com/HSE-asavchenko/face-emotion-recognition/raw/main/"
                  "models/affectnet_emotions/enet_b0_8_best_afew.pt")
-
-
-def list_samples(split_dir):
-    """crop 폴더 → [(경로, 5감정 인덱스)]"""
-    samples = []
-    for name in sorted(os.listdir(split_dir)):
-        target = folder_to_target(unicodedata.normalize("NFC", name))
-        d = os.path.join(split_dir, name)
-        if target is None or not os.path.isdir(d):
-            continue
-        idx = TARGET_LABELS.index(target)
-        samples += [(os.path.join(d, f), idx) for f in sorted(os.listdir(d))
-                    if f.lower().endswith((".jpg", ".jpeg", ".png"))]
-    return samples
 
 
 class FaceDataset(Dataset):
@@ -128,13 +114,6 @@ def export_onnx(model, path):
     diff = float(np.abs(out - ref).max())
     assert diff < 1e-3, f"ONNX 출력이 PyTorch 와 다릅니다 (최대 차이 {diff})"
     print(f"ONNX 저장: {path} (PyTorch 와 최대 차이 {diff:.1e})")
-
-
-def print_confusion(cm):
-    w = max(max(len(l) for l in TARGET_LABELS), len(str(cm.max()))) + 2
-    print("  정답\\예측".ljust(w + 2) + "".join(l.rjust(w) for l in TARGET_LABELS))
-    for l, row in zip(TARGET_LABELS, cm):
-        print(f"  {l}".ljust(w + 2) + "".join(str(v).rjust(w) for v in row))
 
 
 def main():
