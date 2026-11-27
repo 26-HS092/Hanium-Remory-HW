@@ -377,7 +377,7 @@ TRACK_BACKEND=hailo               # pixy 면 Pixy2 팬틸트
 MMWAVE_PORT=/dev/ttyAMA0          # MMWAVE_ENABLED=false 로 끌 수 있음
 
 AUDIO_CONTROL=PCM                 # amixer scontrols 로 확인 (없으면 소프트웨어 볼륨)
-# SPEAKER_VOLUME=1.5              # 앱 볼륨 100% 일 때 몇 배로 낼지 (1.0=원음)
+# SPEAKER_VOLUME=2.0              # 앱 볼륨 100% 일 때 몇 배로 낼지 (1.0=원음)
 # BARGE_IN_ENERGY_THR=600         # 앱 볼륨 100% 일 때 끼어들기 문턱 (모리가 제 말에 멈추면 올림)
 CONVERSATION_LOG_DIR=./conversations
 ```

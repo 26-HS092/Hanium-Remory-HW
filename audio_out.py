@@ -35,10 +35,11 @@ from pathlib import Path
 SPEAKER_ALSA_DEVICE = os.getenv("SPEAKER_ALSA_DEVICE", "plughw:CARD=UACDemoV10")
 
 # 🔊 재생 볼륨(소프트웨어 증폭). 1.0=원음, 2.0=2배, 0.5=절반. 앱 볼륨 100% 일 때 이만큼 낸다.
-# .env 의 SPEAKER_VOLUME 으로 바꾼다. ReSpeaker 잭은 출력이 작아서 기본 1.5배로 키운다.
-# 2배로 했더니 칩이 다 못 지운 모리 목소리가 끼어들기로 잡혀 모리가 제 말에 멈췄다.
+# .env 의 SPEAKER_VOLUME 으로 바꾼다. ReSpeaker 잭은 출력이 작아서 기본 2배로 키운다.
+# 키우면 칩이 다 못 지운 모리 목소리가 끼어들기로 잡혀 모리가 제 말에 멈출 수 있다
+# (1.5배에서도 마이크에 10000 넘게 들어왔다). 그럴 땐 BARGE_IN=0 으로 끈다.
 # 넘치는 소리는 _scale_pcm 이 부드럽게 눌러 찢어지지 않게 하지만, 3 넘게 키우면 뭉개진다.
-SPEAKER_VOLUME = float(os.getenv("SPEAKER_VOLUME", "1.5"))
+SPEAKER_VOLUME = float(os.getenv("SPEAKER_VOLUME", "2.0"))
 
 # 🔊 앱에서 정한 볼륨을 소리에 곱하는 값. set_volume() 으로 바꾼다.
 # ReSpeaker 잭에 꽂은 아날로그 스피커처럼 카드에 볼륨 컨트롤(amixer)이 없을 때 쓴다.
