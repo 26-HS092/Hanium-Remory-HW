@@ -73,11 +73,14 @@ CALIBRATE_MIN_INLIERS = 40  # 이만큼 특징점이 같은 방향으로 움직�
 # 범위를 넓히려면 SCAN_MIN/SCAN_MAX와 PAN_MIN/PAN_MAX를 함께 바꿀 것
 SCAN_MIN = PAN_MIN
 SCAN_MAX = PAN_MAX
-SCAN_SPEED = 30.0     # 탐색 회전 속도 (도/초)
+SCAN_SPEED = 12.0     # 탐색 중 영상이 흔들리지 않도록 천천히 회전 (도/초)
 CONFIRM_FRAMES = 2    # 연속 몇 프레임 보여야 사람으로 확정할지
-LOST_TIMEOUT = 2.0    # 추적 중 이 시간(초) 동안 안 보이면 다시 탐색
-SCAN_GIVEUP = 10.0    # 이 시간(초) 동안 찾아도 없으면 정면에서 쉰다 (보이면 바로 다시 추적)
-SEEK_SPEED = 60.0     # 부르셨는데 아무도 안 잡혀 있을 때 빨리 찾는 속도 (도/초)
+LOST_TIMEOUT = 5.0    # 잠깐의 검출 누락에는 움직이지 않고 마지막 위치 유지
+SCAN_GIVEUP = 12.0    # 이 시간(초) 동안 찾아도 없으면 정면에서 쉰다
+SCAN_MAX_TURNS = 2    # 양 끝에서 두 번 방향을 바꾸면 한 번 탐색한 것으로 보고 쉰다
+SEEK_SPEED = 20.0     # 빠른 탐색도 검출이 가능한 속도로 제한 (도/초)
+SEEK_FAST_TIME = 4.0  # 호출 직후 빠른 탐색을 유지하는 시간
+SEEK_COOLDOWN = 8.0   # 반복 호출로 탐색 제한 시간이 계속 초기화되지 않게 함
 
 # 놓쳤을 때 사라진 쪽으로 돌아보기
 EDGE_MARGIN = 5       # 박스가 화면 끝에서 이 픽셀 안이면 잘린 것으로 봄
@@ -93,7 +96,7 @@ HIST_WEIGHT = 0.5     # 옷 색 유사도를 얼마나 믿을지 (사람끼리 �
 MIN_HIST_SIM = 0.3    # 여러 명일 때 옷 색이 이보다 다르면 대상이 아니라고 봄
 
 # 탐지 설정
-CONF_THRESHOLD = 0.4
+CONF_THRESHOLD = 0.3
 NMS_IOU = 0.6
 REG_MAX = 15            # 박스 회귀 분포 길이 (YOLOv8)
 KEYPOINT_CONF = 0.5     # 관절이 이 확률 이상이면 보인다고 봄
@@ -629,6 +632,7 @@ class HailoFaceTracker:
         self.scan_direction = 1
         self.scan_started = time.monotonic()   # 이번 탐색을 시작한 때 (SCAN_GIVEUP 용)
         self.scan_resting = False
+        self.scan_turns = 0
         # 최근 얼굴이 있던 서보 각도 기록 (시각, pan, tilt): 놓쳤을 때 갈 곳 예측용
         self.face_history = deque()
         self.lost_goal = None      # 놓친 뒤 돌아볼 (pan, tilt)
@@ -651,6 +655,7 @@ class HailoFaceTracker:
         # 켜지면 다음 프레임부터 SEEK_SPEED 로 다시 찾는다 (seek())
         self._seek = threading.Event()
         self._seek_until = 0.0
+        self._last_seek_at = -float("inf")
 
     # ── 장치 열기 ─────────────────────────────────────────────
     def open(self):
@@ -751,12 +756,15 @@ class HailoFaceTracker:
 
         if self._seek.is_set():
             self._seek.clear()
-            # 잠깐 놓친 중(track)이면 곧 넘어갈 탐색부터 빠르게 한다
-            self._seek_until = now + SCAN_GIVEUP
-            if self.mode == "scan":
-                # 쉬고 있었어도 처음부터 다시 찾는다
-                self._start_scan()
-                print("부르셔서 빠르게 찾는 중", flush=True)
+            if now - self._last_seek_at >= SEEK_COOLDOWN:
+                self._last_seek_at = now
+                # 잠깐 놓친 중(track)이면 곧 넘어갈 탐색부터 빠르게 한다.
+                self._seek_until = now + SEEK_FAST_TIME
+                if self.mode == "scan":
+                    # 이미 탐색 중이면 제한 시간을 다시 시작하지 않는다.
+                    if self.scan_resting:
+                        self._start_scan()
+                    print("부르셔서 빠르게 찾는 중", flush=True)
 
         full, frame = self._grab()
 
@@ -914,7 +922,7 @@ class HailoFaceTracker:
             else:
                 target_status = "대상 안 보임: 각도 유지"
 
-        elif now - self.scan_started > SCAN_GIVEUP:
+        elif self.scan_resting or now - self.scan_started > SCAN_GIVEUP:
             # 한참 찾아도 없으면 정면으로 돌아와 쉰다. 검출은 계속해서 보이면 바로 추적
             if not self.scan_resting:
                 self.scan_resting = True
@@ -931,9 +939,14 @@ class HailoFaceTracker:
             if self.pan >= SCAN_MAX:
                 self.pan = SCAN_MAX
                 self.scan_direction = -1
+                self.scan_turns += 1
             elif self.pan <= SCAN_MIN:
                 self.pan = SCAN_MIN
                 self.scan_direction = 1
+                self.scan_turns += 1
+
+            if self.scan_turns >= SCAN_MAX_TURNS:
+                self.scan_resting = True
 
             self.tilt = float(TILT_CENTER)
             target_status = "탐색 중"
@@ -1155,6 +1168,7 @@ class HailoFaceTracker:
     def _start_scan(self):
         self.scan_started = time.monotonic()
         self.scan_resting = False
+        self.scan_turns = 0
 
     def _loop(self):
         errors = 0
